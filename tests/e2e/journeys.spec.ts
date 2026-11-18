@@ -270,3 +270,10 @@ test('layout: no horizontal scroll, the page itself never scrolls, the tab bar s
     if (isMobile) expect(m.nav, p).toBe(0);
   }
 });
+
+test('when Wikimedia is busy, search says so instead of showing no films', async ({ page }) => {
+  await page.route(/wikipedia\.org|wikidata\.org/, (r) => r.fulfill({ status: 429, body: 'Too many requests' }));
+  await search(page, 'severance');
+  await expect(page.locator('li.hit', { hasText: 'Severance' })).toBeVisible();
+  await expect(page.getByText(/Films and people unavailable just now/)).toBeVisible();
+});

@@ -104,11 +104,11 @@ export function rankByTitle<T extends { title: string }>(q: string, pages: T[]):
  */
 export async function searchFilms(q: string): Promise<{ films: FilmHit[]; people: PersonHit[] }> {
   const { text } = splitYear(q);
-  const [byTitle, wd] = await Promise.all([
-    wpFilmSearch(`intitle:"${text.replace(/"/g, '')}"`).catch(() => [] as WpPage[]),
-    wdSearch(text).catch(() => ({ films: [] as FilmHit[], people: [] as PersonHit[] })),
-  ]);
-  const pages = byTitle.length ? byTitle : rankByTitle(text, await wpFilmSearch(text));
+  const [byTitle, wd] = await Promise.allSettled([wpFilmSearch(`intitle:"${text.replace(/"/g, '')}"`), wdSearch(text)]);
+  if (byTitle.status === 'rejected' && wd.status === 'rejected') throw byTitle.reason;
+  const titled = byTitle.status === 'fulfilled' ? byTitle.value : [];
+  const labelled = wd.status === 'fulfilled' ? wd.value : { films: [] as FilmHit[], people: [] as PersonHit[] };
+  const pages = titled.length || byTitle.status === 'rejected' ? titled : rankByTitle(text, await wpFilmSearch(text));
   const films: FilmHit[] = pages.map((p) => ({
     qid: p.pageprops!.wikibase_item!,
     wiki: p.title,
@@ -118,7 +118,7 @@ export async function searchFilms(q: string): Promise<{ films: FilmHit[]; people
     poster: stripImg(p.thumbnail?.source),
   }));
   const seen = new Set(films.map((f) => f.qid));
-  return { films: rankHits(q, [...films, ...wd.films.filter((f) => !seen.has(f.qid))]), people: wd.people.slice(0, 4) };
+  return { films: rankHits(q, [...films, ...labelled.films.filter((f) => !seen.has(f.qid))]), people: labelled.people.slice(0, 4) };
 }
 
 /** Lead images for up to 50 Wikipedia articles in one request (posters, portraits). */
