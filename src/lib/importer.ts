@@ -150,11 +150,12 @@ export interface Item {
   owned?: string;
 }
 
-const FILM_T = ['Q11424', 'Q24869', 'Q202866', 'Q93204', 'Q506240', 'Q226730'];
+const FILM_T = ['Q11424', 'Q24869', 'Q202866', 'Q29168811', 'Q93204', 'Q506240', 'Q226730'];
 const SHOW_T = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
 const tail = (u: string) => u.slice(u.lastIndexOf('/') + 1);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+// SPARQL string literal: escape backslashes and quotes; a raw line break would be a syntax error.
+const lit = (s: string) => `"${s.replace(/[\u0000-\u001f]/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 async function sparql(query: string) {
   const res = await getJson<{ results: { bindings: Record<string, { value: string }>[] } }>(
@@ -166,24 +167,24 @@ async function sparql(query: string) {
 }
 
 /** Wikidata items for IMDb ids, up to 150 per query. */
-async function byImdb(ids: string[]) {
+export async function byImdb(ids: string[]) {
   const out = new Map<string, Match>();
   for (let i = 0; i < ids.length; i += 150) {
-    const rows = await sparql(`SELECT ?imdb ?item (SAMPLE(?l) AS ?label) (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) (GROUP_CONCAT(DISTINCT STR(?t)) AS ?types) WHERE {
+    const rows = await sparql(`SELECT ?imdb ?item ?itemLabel (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) (GROUP_CONCAT(DISTINCT STR(?t)) AS ?types) WHERE {
   VALUES ?imdb { ${ids.slice(i, i + 150).map(lit).join(' ')} }
   ?item wdt:P345 ?imdb.
   OPTIONAL { ?item wdt:P31 ?t }
-  OPTIONAL { ?item rdfs:label ?l. FILTER(LANG(?l) = "en") }
   OPTIONAL { ?item wdt:P577|wdt:P580 ?d }
   OPTIONAL { ?item wdt:P8600 ?tv }
-} GROUP BY ?imdb ?item`);
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en,mul". }
+} GROUP BY ?imdb ?item ?itemLabel`);
     for (const b of rows) {
       const types = (b.types?.value ?? '').split(' ').map(tail);
       out.set(b.imdb.value, {
         kind: types.some((t) => SHOW_T.includes(t)) ? 'show' : 'film',
         qid: tail(b.item.value),
         tvmaze: Number(b.tvm?.value) || undefined,
-        name: b.label?.value ?? b.imdb.value,
+        name: b.itemLabel?.value ?? b.imdb.value,
         year: Number(b.y?.value) || undefined,
       });
     }
@@ -191,17 +192,20 @@ async function byImdb(ids: string[]) {
   return out;
 }
 
-/** Films and series whose English label is exactly one of these names, 100 names per query. */
-async function byLabel(names: string[]) {
+/**
+ * Films and series whose English (or language-neutral "mul") label is exactly one of these names,
+ * 100 names per query. Many titles now carry only a "mul" label.
+ */
+export async function byLabel(names: string[]) {
   const out = new Map<string, (Match & { links: number })[]>();
   for (let i = 0; i < names.length; i += 100) {
-    const rows = await sparql(`SELECT ?name ?item ?type ?links (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) WHERE {
-  VALUES ?name { ${names.slice(i, i + 100).map((n) => `${lit(n)}@en`).join(' ')} }
+    const rows = await sparql(`SELECT (STR(?label) AS ?name) ?item ?type ?links (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) WHERE {
+  VALUES ?label { ${names.slice(i, i + 100).flatMap((n) => [`${lit(n)}@en`, `${lit(n)}@mul`]).join(' ')} }
   VALUES ?type { ${[...FILM_T, ...SHOW_T].map((q) => `wd:${q}`).join(' ')} }
-  ?item rdfs:label ?name; wdt:P31 ?type; wikibase:sitelinks ?links.
+  ?item rdfs:label ?label; wdt:P31 ?type; wikibase:sitelinks ?links.
   OPTIONAL { ?item wdt:P577|wdt:P580 ?d }
   OPTIONAL { ?item wdt:P8600 ?tv }
-} GROUP BY ?name ?item ?type ?links`);
+} GROUP BY ?label ?item ?type ?links`);
     for (const b of rows) {
       const list = out.get(b.name.value) ?? [];
       const qid = tail(b.item.value);

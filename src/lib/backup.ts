@@ -152,22 +152,29 @@ const fileName = (b: Backup) => `parde-backup-${b.exportedAt.slice(0, 10)}.json`
 
 /**
  * Hand the file to the person. On phones the share sheet ("Save to Files") is the only reliable
- * way out of an installed web app; elsewhere a normal download. Returns false if they cancelled.
+ * way out of an installed web app; elsewhere a normal download.
+ * 'blocked': the browser wants the share to start from a fresh tap; call `shareBackup` from one.
  */
-export async function saveBackup(backup: Backup): Promise<boolean> {
+export async function saveBackup(backup: Backup): Promise<'saved' | 'cancelled' | 'blocked'> {
   const json = JSON.stringify(backup, null, 1);
   const file = new File([json], fileName(backup), { type: 'application/json' });
   if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file] });
-      return true;
-    } catch (e) {
-      if ((e as Error).name === 'AbortError') return false;
-      // Share sheet unavailable after all: fall through to a download.
-    }
+    const r = await shareBackup(backup);
+    if (r !== 'failed') return r;
   }
   download(backup, json);
-  return true;
+  return 'saved';
+}
+
+export async function shareBackup(backup: Backup): Promise<'saved' | 'cancelled' | 'blocked' | 'failed'> {
+  const file = new File([JSON.stringify(backup, null, 1)], fileName(backup), { type: 'application/json' });
+  try {
+    await navigator.share({ files: [file] });
+    return 'saved';
+  } catch (e) {
+    const name = (e as Error).name;
+    return name === 'AbortError' ? 'cancelled' : name === 'NotAllowedError' ? 'blocked' : 'failed';
+  }
 }
 
 function download(backup: Backup, json: string) {

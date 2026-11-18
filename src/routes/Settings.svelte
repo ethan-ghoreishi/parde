@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { db, getSetting, setSetting, type Link } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { buildBackup, saveBackup, parseBackup, restore, undoRestore, UNDO_KEY, type Backup } from '../lib/backup';
+  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, UNDO_KEY, type Backup } from '../lib/backup';
   import { moveDomain, persistStorage } from '../lib/actions';
   import { hostOf } from '../lib/links';
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
@@ -29,13 +29,20 @@
   async function exportNow() {
     try {
       const b = await buildBackup();
-      if (!(await saveBackup(b))) return toast('Backup not saved', 'error');
-      await setSetting('lastBackupAt', b.exportedAt);
-      persistStorage();
-      toast('Backup saved. Keep it somewhere safe (iCloud Drive, NAS…).');
+      const r = await saveBackup(b);
+      if (r === 'cancelled') return toast('Backup not saved', 'error');
+      // Safari can refuse a share that did not start straight from a tap: offer one.
+      if (r === 'blocked') return toast('Backup ready', 'ok', { label: 'Save', run: async () => (await shareBackup(b)) === 'saved' && saved(b) });
+      await saved(b);
     } catch (e) {
       toast(errorText(e), 'error');
     }
+  }
+
+  async function saved(b: Backup) {
+    await setSetting('lastBackupAt', b.exportedAt);
+    persistStorage();
+    toast('Backup saved. Keep it somewhere safe (iCloud Drive, NAS…).');
   }
 
   let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string } | null>(null);

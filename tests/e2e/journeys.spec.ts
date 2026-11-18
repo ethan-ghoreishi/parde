@@ -37,7 +37,7 @@ async function stub(page: Page) {
   });
   await page.route(/query\.wikidata\.org\/sparql/, (r) => {
     const q = new URL(r.request().url()).searchParams.get('query')!;
-    if (q.includes('rdfs:label ?name')) {
+    if (q.includes('wikibase:sitelinks')) {
       return r.fulfill({ json: { results: { bindings: [
         sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q42198', type: 'http://www.wikidata.org/entity/Q11424', links: '80', y: '1995' }),
         sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q1', type: 'http://www.wikidata.org/entity/Q11424', links: '5', y: '1972' }),

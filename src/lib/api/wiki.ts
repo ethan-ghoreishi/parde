@@ -66,7 +66,7 @@ async function wdSearch(q: string) {
     const d = x.description ?? '';
     if (!x.label) continue;
     if (FILM_DESC.test(d) && !NOT_FILM.test(d)) films.push({ qid: x.id, wiki: '', name: x.label, description: d, year: yearIn(d) });
-    else if (PERSON_DESC.test(d) && !FILM_DESC.test(d.replace(/\bfilm (director|producer|maker|editor|actor|actress)/gi, ''))) people.push({ qid: x.id, name: x.label, description: d });
+    else if (PERSON_DESC.test(d) && !/graphy\b|^list /i.test(d) && !FILM_DESC.test(d.replace(/\bfilm (director|producer|maker|editor|actor|actress)/gi, ''))) people.push({ qid: x.id, name: x.label, description: d });
   }
   return { films, people };
 }
@@ -368,7 +368,7 @@ export interface Credit {
   via: string;
 }
 
-const FILM_TYPES = ['Q11424', 'Q24869', 'Q202866', 'Q93204', 'Q506240', 'Q226730'];
+const FILM_TYPES = ['Q11424', 'Q24869', 'Q202866', 'Q29168811', 'Q93204', 'Q506240', 'Q226730'];
 const SHOW_TYPES = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
 
 /**
