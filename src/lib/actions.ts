@@ -1,6 +1,6 @@
 import { db, getSetting, now, setSetting, uid, type Episode, type Link, type Status, type Title } from './db';
 import { fetchShow, showUpdates, toEpisode } from './api/tvmaze';
-import { filmMeta, qidForImdb, wikidataMeta, type Meta } from './api/wiki';
+import { filmMeta, filmMetas, qidForImdb, wikidataMeta, type Meta } from './api/wiki';
 import { byOrder, isAired } from './schedule';
 import { cleanUrl, replaceHost, hostOf } from './links';
 
@@ -23,6 +23,24 @@ export async function addFilm(qid: string): Promise<string> {
   await db.titles.add(newTitle(id, meta));
   persistStorage();
   return id;
+}
+
+/**
+ * Many films at once (an import): metadata 50 per request, with patience when Wikimedia is busy.
+ * Films already here are left alone. Returns the ids actually added.
+ */
+export async function addFilms(entries: { qid: string; patch: Partial<Title> }[]): Promise<string[]> {
+  const have = new Set((await db.titles.bulkGet(entries.map((e) => `wd:${e.qid}`))).filter(Boolean).map((t) => t!.id));
+  const fresh = entries.filter((e) => !have.has(`wd:${e.qid}`));
+  if (!fresh.length) return [];
+  const metas = await filmMetas(fresh.map((e) => e.qid), 3);
+  const rows = fresh.flatMap((e) => {
+    const m = metas.get(e.qid);
+    return m ? [{ ...newTitle(`wd:${e.qid}`, m), ...e.patch }] : [];
+  });
+  await db.titles.bulkAdd(rows);
+  persistStorage();
+  return rows.map((t) => t.id);
 }
 
 /** Wikidata adds critics, subjects, countries and linked people to a TVmaze show, when it can be found. */

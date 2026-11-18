@@ -145,6 +145,12 @@
 </section>
 
 <section class="section card stack">
+  <h2>Import</h2>
+  <p class="small">Bring in your history from Letterboxd, IMDb or a typed list, with ratings and where you are in series.</p>
+  <a class="btn" href="#/import">Import ratings and history…</a>
+</section>
+
+<section class="section card stack">
   <h2>Who you watch with</h2>
   <label for="partner">Partner's name (adds a second rating when you watch together)</label>
   <input id="partner" type="text" value={data.value.partner} onchange={(e) => setSetting('partner', e.currentTarget.value.trim())} placeholder="Optional" style="max-width: 320px" />

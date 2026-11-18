@@ -113,10 +113,11 @@
     <ol class="small">
       <li>Add a few films and series you have seen and rate them — it takes seconds each.</li>
       <li>Add what you want to watch, and after each trailer note how keen you are.</li>
-      <li>For series you are watching, mark where you are. New episodes appear on the calendar.</li>
+      <li>For series you are watching, pick the last episode you saw. New episodes appear on the calendar.</li>
     </ol>
     <div class="row">
       <button class="primary" onclick={() => (ui.searchOpen = true)}>Add your first title</button>
+      <a class="btn" href="#/import">Import from Letterboxd, IMDb or a list</a>
       <a class="btn" href="#/settings">Restore a backup</a>
     </div>
     <p class="small muted">Everything stays in this browser. Nothing is uploaded anywhere.</p>
