@@ -1,0 +1,7 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "parde-dev", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 5391, "url": "http://parde.localhost:5391" },
+    { "name": "parde-preview", "runtimeExecutable": "npm", "runtimeArgs": ["run", "preview"], "port": 4391, "url": "http://parde.localhost:4391" }
+  ]
+}
