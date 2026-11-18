@@ -3,6 +3,7 @@
   import { titleHref } from '../lib/router.svelte';
   import { toast, errorText } from '../lib/ui.svelte';
   import ProgressPicker from '../components/ProgressPicker.svelte';
+  import { db } from '../lib/db';
 
   let text = $state('');
   let fileName = $state('');
@@ -34,6 +35,7 @@
   }
 
   async function match() {
+    if (navigator.onLine === false) return toast('You are offline. Matching needs Wikidata and TVmaze.', 'error');
     phase = 'matching';
     progress = { done: 0, total: rows.length };
     try {
@@ -51,7 +53,6 @@
     progress = { done: 0, total: toAdd };
     try {
       outcome = await commit(items, plans, (done, total) => (progress = { done, total }));
-      const { db } = await import('../lib/db');
       names = Object.fromEntries((await db.titles.bulkGet(outcome.toPlace)).filter(Boolean).map((t) => [t!.id, t!.name]));
       phase = 'done';
     } catch (e) {

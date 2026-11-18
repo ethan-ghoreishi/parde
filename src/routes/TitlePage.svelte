@@ -170,6 +170,7 @@
             <div class="row">
               {#if best}
                 <button class="primary" onclick={openBest}>Watch on {best.link.label || hostOf(best.url)} ↗</button>
+                <button class="ghost small" onclick={() => copy(best.url)} aria-label="Copy the link for {code(next)}">Copy link</button>
               {/if}
               <button onclick={() => setSeen(next, true)} disabled={!isAired(next)}>Mark {code(next)} seen</button>
             </div>
@@ -297,7 +298,7 @@
         {/if}
 
         <section class="section">
-          <Sources title={t} links={linksQ.value} heading={t.kind === 'show' ? 'Sources for the whole series' : 'Where to watch'} />
+          <Sources title={t} links={linksQ.value} heading={t.kind === 'show' ? 'Sources for the whole series' : 'Where to watch'} next={t.kind === 'show' ? next : undefined} />
         </section>
       </div>
 
