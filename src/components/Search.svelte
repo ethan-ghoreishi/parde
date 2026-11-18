@@ -67,7 +67,10 @@
     films = f.status === 'fulfilled' ? f.value.films.slice(0, 8) : [];
     people = f.status === 'fulfilled' ? f.value.people : [];
     shows = s.status === 'fulfilled' ? s.value.slice(0, 6) : [];
+    // Say which half is missing rather than showing an empty list as if nothing matched.
     if (f.status === 'rejected' && s.status === 'rejected') error = errorText(f.reason);
+    else if (f.status === 'rejected') error = `Films and people unavailable just now: ${errorText(f.reason)}`;
+    else if (s.status === 'rejected') error = `Series unavailable just now: ${errorText(s.reason)}`;
   }
 
   async function add(kind: 'film' | 'show', key: string | number, status: Status) {
