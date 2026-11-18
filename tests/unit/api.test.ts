@@ -83,3 +83,38 @@ describe('film search ranking', () => {
     expect(rankByTitle('jodaeiye', P('A Separation')).length).toBe(1);
   });
 });
+
+import { splitYear, rankHits, parseCredits } from '../../src/lib/api/wiki';
+describe('search ranking', () => {
+  it('reads a trailing year in any common form', () => {
+    expect(splitYear('heat 1995')).toEqual({ text: 'heat', year: 1995 });
+    expect(splitYear('Heat (1995)')).toEqual({ text: 'Heat', year: 1995 });
+    expect(splitYear('2001: A Space Odyssey')).toEqual({ text: '2001: A Space Odyssey' });
+    expect(splitYear('1917')).toEqual({ text: '1917' });
+  });
+  it('puts the exact title first, then the matching year, otherwise keeps source order', () => {
+    const hits = [{ name: 'Talk to Her', year: 2002 }, { name: 'Her', year: 2013 }, { name: 'Her', year: 1999 }];
+    expect(rankHits('her', hits).map((h) => h.year)).toEqual([2013, 1999, 2002]);
+    expect(rankHits('Her 1999', hits)[0].year).toBe(1999);
+    expect(rankHits('amelie', [{ name: 'Romance with Amelie' }, { name: 'Amélie' }])[0].name).toBe('Amélie');
+  });
+});
+
+describe('credits', () => {
+  const b = (w: string, label: string, prop: string, type: string, extra: Record<string, string> = {}) => ({
+    w: { value: `http://www.wikidata.org/entity/${w}` }, wLabel: { value: label }, prop: { value: `http://www.wikidata.org/prop/direct/${prop}` },
+    type: { value: `http://www.wikidata.org/entity/${type}` }, person: { value: 'http://www.wikidata.org/entity/Q548823' },
+    ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, { value: v }])),
+  });
+  it('merges roles per work, most telling first, and spots series with their TVmaze id', () => {
+    const c = parseCredits([
+      b('Q1', 'Dune', 'P58', 'Q11424', { y: '2021', article: 'https://en.wikipedia.org/wiki/Dune_(2021_film)' }),
+      b('Q1', 'Dune', 'P57', 'Q11424', { y: '2021' }),
+      b('Q2', 'Severance', 'P57', 'Q5398426', { tvm: '44933' }),
+      b('Q3', 'Q3', 'P57', 'Q11424'),
+    ]);
+    expect(c).toHaveLength(2);
+    expect(c[0]).toMatchObject({ qid: 'Q1', kind: 'film', roles: ['directed', 'wrote'], year: 2021, wiki: 'Dune (2021 film)', via: 'Q548823' });
+    expect(c[1]).toMatchObject({ kind: 'show', tvmaze: 44933 });
+  });
+});

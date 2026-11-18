@@ -4,6 +4,7 @@
   import { dayKey } from '../lib/schedule';
   import { toast, errorText } from '../lib/ui.svelte';
   import Scale from './Scale.svelte';
+  import Themes from './Themes.svelte';
 
   let { title, open = $bindable(false), partner }: { title: Title; open?: boolean; partner: string } = $props();
   let dialog: HTMLDialogElement;
@@ -53,6 +54,10 @@
         <Scale max={10} value={partnerRating} onpick={(v) => (partnerRating = v)} name="Partner rating" />
       </div>
     {/if}
+    <div>
+      <span class="label">What was it about for you? (optional)</span>
+      <Themes {title} compact />
+    </div>
     <div class="row">
       <button class="primary" type="submit">Save</button>
       <button type="button" class="ghost" onclick={() => (open = false)}>Cancel</button>

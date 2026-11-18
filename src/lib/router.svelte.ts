@@ -9,7 +9,8 @@ export const route = $state(parse());
 
 addEventListener('hashchange', () => {
   Object.assign(route, parse());
-  window.scrollTo(0, 0);
+  // The content area scrolls, not the window (see the app shell in app.css).
+  document.getElementById('scroller')?.scrollTo(0, 0);
 });
 
 export const go = (to: string) => {
@@ -17,3 +18,5 @@ export const go = (to: string) => {
 };
 
 export const titleHref = (id: string) => `#/t/${encodeURIComponent(id)}`;
+/** A person by Wikidata id when known, else by name (TVmaze cast have no Wikidata id). */
+export const personHref = (qid: string | undefined, name: string) => `#/p?${new URLSearchParams(qid ? { q: qid, name } : { name })}`;

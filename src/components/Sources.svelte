@@ -1,12 +1,13 @@
 <script lang="ts">
   import type { Link, Title } from '../lib/db';
-  import { resolveLinks, hostOf, isPattern, suggestPattern, openExternal, cleanUrl, type Level } from '../lib/links';
+  import { resolveLinks, hostOf, isPattern, suggestPattern, openExternal, cleanUrl, expand, type Level } from '../lib/links';
+  import { code } from '../lib/schedule';
   import { addLink, deleteLink, editLink } from '../lib/actions';
   import { copy, toast, errorText } from '../lib/ui.svelte';
   import { db, now } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { getSetting } from '../lib/db';
-  import { DEFAULT_SITES, siteUrl, type Site } from '../lib/sites';
+  import { DEFAULT_SITES, siteUrl, validSite, type Site } from '../lib/sites';
 
   let {
     title,
@@ -14,7 +15,8 @@
     season,
     episode,
     heading = 'Where to watch',
-  }: { title: Title; links: Link[]; season?: number; episode?: number; heading?: string } = $props();
+    next,
+  }: { title: Title; links: Link[]; season?: number; episode?: number; heading?: string; next?: { season: number; number: number } } = $props();
 
   const uidp = $props.id();
   const resolved = $derived(resolveLinks(links, season, episode));
@@ -36,8 +38,12 @@
 
   const levelText: Record<Level, string> = { episode: 'this episode', season: 'this season', show: 'whole series', title: '' };
 
+  /** A series-wide pattern listed outside an episode opens (and copies) as the episode you are up to. */
+  const target = (r: (typeof resolved)[number]) => (isPattern(r.url) && next ? expand(r.url, next.season, next.number) : r.url);
+
   async function open(r: (typeof resolved)[number]) {
-    if (!openExternal(r.url)) return toast('This link is not a valid web address. Edit it.', 'error');
+    if (isPattern(target(r))) return toast('This is a pattern for every episode: open it from an episode below.', 'error');
+    if (!openExternal(target(r))) return toast('This link is not a valid web address. Edit it.', 'error');
     await editLink(r.link.id, { usedAt: now() });
   }
 
@@ -145,7 +151,7 @@
 
   <div class="find row small">
     <span class="muted">Find on</span>
-    {#each sites.value as s}
+    {#each sites.value.filter(validSite) as s}
       <a href={siteUrl(s, findQuery)} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">{s.name} ↗</a>
     {/each}
     <a href="#/settings" class="muted">edit sites</a>
@@ -165,15 +171,15 @@
       </form>
     {:else}
       <div class="main">
-        <button class="open" onclick={() => open(r)} disabled={!!r.link.broken} title={r.url}>
+        <button class="open" onclick={() => open(r)} disabled={!!r.link.broken} title={target(r)}>
           <span class="host">{r.link.label || hostOf(r.url)}</span>
           {#if r.link.label}<span class="muted small">{hostOf(r.url)}</span>{/if}
           {#if isEpisode && r.level !== 'episode'}<span class="chip">{levelText[r.level]}</span>{/if}
-          {#if isPattern(r.link.url)}<span class="chip">pattern</span>{/if}
+          {#if isPattern(r.link.url)}<span class="chip">{!isEpisode && next ? `pattern · opens ${code({ season: next.season, number: next.number })}` : 'pattern'}</span>{/if}
           <span aria-hidden="true">↗</span>
         </button>
         <div class="row tools">
-          <button class="small ghost" onclick={() => copy(r.url)} aria-label="Copy link">Copy</button>
+          <button class="small ghost" onclick={() => copy(target(r))} aria-label="Copy link">Copy</button>
           {#if r.link.broken}
             <button class="small ghost" onclick={() => markBroken(r.link, false)}>Works again</button>
           {:else}

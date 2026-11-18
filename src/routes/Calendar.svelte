@@ -29,7 +29,10 @@
     const m = new Map<string, Episode[]>();
     for (const e of data.value.episodes) {
       const d = localDay(e);
-      if (d) m.set(d, [...(m.get(d) ?? []), e]);
+      if (!d) continue;
+      const list = m.get(d);
+      if (list) list.push(e);
+      else m.set(d, [e]);
     }
     return m;
   });
@@ -47,13 +50,41 @@
     });
   });
 
-  const dayEps = $derived(
-    (byDay.get(selected) ?? []).sort((a, b) => (localTime(a) ?? '').localeCompare(localTime(b) ?? '') || a.titleId.localeCompare(b.titleId) || byOrder(a, b)),
-  );
+  const plus = (key: string, days: number) => {
+    const d = new Date(`${key}T12:00:00`);
+    d.setDate(d.getDate() + days);
+    return dayKey(d);
+  };
 
-  const nextDays = $derived(
-    [...byDay.keys()].filter((d) => d > selected).sort().slice(0, 1)[0],
-  );
+  /** The selected day and the two weeks after it, each day's episodes grouped by series (a season drop is one card). */
+  const agenda = $derived.by(() => {
+    const end = plus(selected, 14);
+    return [...byDay.keys()]
+      .filter((d) => d >= selected && d <= end)
+      .sort()
+      .map((day) => {
+        const groups = new Map<string, Episode[]>();
+        for (const e of [...byDay.get(day)!].sort(byOrder)) {
+          const list = groups.get(e.titleId);
+          if (list) list.push(e);
+          else groups.set(e.titleId, [e]);
+        }
+        return {
+          day,
+          groups: [...groups].map(([id, eps]) => ({ t: showOf.get(id)!, eps })).filter((g) => g.t)
+            .sort((a, b) => (localTime(a.eps[0]) ?? '').localeCompare(localTime(b.eps[0]) ?? '') || a.t.name.localeCompare(b.t.name)),
+        };
+      });
+  });
+  const later = $derived([...byDay.keys()].filter((d) => d > plus(selected, 14)).sort()[0]);
+
+  const span = (eps: Episode[]) =>
+    eps.length === 1 ? `${code(eps[0])} ${eps[0].name}` : eps.every((e) => e.season === eps[0].season) ? `${code(eps[0])}–E${String(eps.at(-1)!.number).padStart(2, '0')} · ${eps.length} episodes` : eps.map(code).join(', ');
+  const where = (t: Title) => {
+    const r = release(t);
+    return r.where ? `${r.where}${t.channelCountry ? ` (${t.channelCountry})` : ''}` : '';
+  };
+  const sourceFor = (e: Episode) => resolveLinks(data.value.links.filter((l) => l.titleId === e.titleId), e.season, e.number).find((r) => !r.link.broken);
 
   const shift = (days: number) => {
     const d = new Date(`${selected}T12:00:00`);
@@ -75,9 +106,14 @@
   }
 
   async function open(e: Episode) {
-    const src = resolveLinks(data.value.links.filter((l) => l.titleId === e.titleId), e.season, e.number).find((r) => !r.link.broken);
+    const src = sourceFor(e);
     if (!src) return go(titleHref(e.titleId).slice(1));
     if (openExternal(src.url)) await editLink(src.link.id, { usedAt: now() });
+    else toast('That saved link is not valid. Edit it on the series page.', 'error');
+  }
+
+  async function allSeen(eps: Episode[]) {
+    for (const e of eps.filter((x) => isAired(x) && !data.value.seen.has(x.id))) await setSeen(e, true);
   }
 </script>
 
@@ -110,49 +146,66 @@
 </div>
 
 <section class="section" aria-live="polite">
-  <h2>{formatDay(selected)}{formatDay(selected).length < 10 ? ` · ${new Date(`${selected}T12:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}` : ''}</h2>
   {#if !data.value.shows.length && data.ready}
     <div class="empty">No series on your calendar yet. Add a series you watch and its episodes will show up here.</div>
-  {:else if !dayEps.length}
+  {:else if !agenda.length}
     <div class="empty">
-      Nothing from your series on this day.
-      {#if nextDays}<a href="#/calendar?d={nextDays}">Next: {formatDay(nextDays)} →</a>{/if}
+      Nothing from your series in the two weeks from {formatDay(selected)}.
+      {#if later}<a href="#/calendar?d={later}">Next: {formatDay(later)} →</a>{/if}
     </div>
   {:else}
-    <ul class="eps">
-      {#each dayEps as e (e.id)}
-        {@const t = showOf.get(e.titleId)!}
-        {@const r = release(t)}
-        {@const on = data.value.seen.has(e.id)}
-        {@const aired = isAired(e)}
-        <li class="card" class:on>
-          <a href={titleHref(t.id)} aria-label={t.name}><Poster src={t.poster} name={t.name} size="xs" /></a>
-          <div class="info">
-            <a class="name" href={titleHref(t.id)}>{t.name}</a>
-            <div class="small"><strong>{code(e)}</strong> {e.name}</div>
-            <div class="row small">
-              {#if r.kind === 'stream'}
-                <span class="chip stream" title="The streaming service's own release date">Released on {r.where}</span>
-              {:else if r.kind === 'broadcast'}
-                <span class="chip broadcast" title="Broadcast date. Streaming availability may differ.">Airs on {r.where}</span>
-              {:else}
-                <span class="chip">Release date</span>
+    {#each agenda as { day, groups } (day)}
+      <h2 class="day" class:today={day === today}>{formatDay(day)}{formatDay(day).length < 10 ? ` · ${new Date(`${day}T12:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })}` : ''}</h2>
+      <ul class="eps">
+        {#each groups as { t, eps } (t.id)}
+          {@const r = release(t)}
+          {@const unseen = eps.filter((e) => !data.value.seen.has(e.id))}
+          {@const out = eps.every((e) => isAired(e))}
+          {@const first = unseen.find((e) => isAired(e))}
+          {@const src = first ? sourceFor(first) : undefined}
+          <li class="card" class:on={!unseen.length}>
+            <a href={titleHref(t.id)} aria-label={t.name}><Poster src={t.poster} name={t.name} size="xs" /></a>
+            <div class="info">
+              <a class="name" href={titleHref(t.id)}>{t.name}</a>
+              <div class="small">{span(eps)}</div>
+              <div class="row small">
+                {#if r.kind === 'stream'}
+                  <span class="chip stream" title="The streaming service's own release date">Released on {where(t)}</span>
+                {:else if r.kind === 'broadcast'}
+                  <span class="chip broadcast" title="Broadcast date. Streaming availability may differ.">Airs on {where(t)}</span>
+                {:else}
+                  <span class="chip">Release date</span>
+                {/if}
+                {#if localTime(eps[0])}<span class="muted">{localTime(eps[0])} your time</span>{/if}
+              </div>
+              {#if out && unseen.length}
+                <div class="small muted">{src ? `Your source: ${src.link.label || hostOf(src.url)}` : 'No source saved for this yet'}</div>
               {/if}
-              {#if localTime(e)}<span class="muted">{localTime(e)} your time</span>{/if}
             </div>
-          </div>
-          <div class="acts">
-            <label class="seen"><input type="checkbox" checked={on} onchange={(ev) => setSeen(e, ev.currentTarget.checked)} /> Seen</label>
-            {#if aired && !on}<button class="small" onclick={() => open(e)}>Watch ↗</button>{/if}
-          </div>
-        </li>
-      {/each}
-    </ul>
+            <div class="acts">
+              {#if eps.length === 1}
+                <label class="seen"><input type="checkbox" checked={!unseen.length} onchange={(ev) => setSeen(eps[0], ev.currentTarget.checked)} /> Seen</label>
+              {:else if unseen.some((e) => isAired(e))}
+                <button class="small" onclick={() => allSeen(eps)}>All seen</button>
+              {:else if !unseen.length}
+                <span class="small muted">All seen</span>
+              {/if}
+              {#if first}
+                {#if src}<button class="small" onclick={() => open(first)}>Watch {eps.length > 1 ? code(first) : ''} ↗</button>{:else}<a class="btn small" href={titleHref(t.id)}>Add a source</a>{/if}
+              {:else if !out}
+                <span class="small muted">Not out yet</span>
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/each}
+    {#if later}<p class="small"><a href="#/calendar?d={later}">Later: {formatDay(later)} →</a></p>{/if}
   {/if}
   <p class="small muted note">
-    <span class="chip stream">Released on</span> is a streaming service's own release date.
-    <span class="chip broadcast">Airs on</span> is a TV broadcast date, converted to your time zone; it does not confirm when it reaches streaming sites.
-    Schedule data from <a href="https://www.tvmaze.com" target="_blank" rel="noopener noreferrer">TVmaze</a> (CC BY-SA).
+    <span class="chip stream">Released on</span> is the streaming service's own release date; a country in brackets means it is released there first, and may come elsewhere later or not at all.
+    <span class="chip broadcast">Airs on</span> is a TV broadcast, shown in your time zone; it says nothing certain about when it reaches streaming.
+    Neither can confirm it is available to you: only your own sources can. Schedule data from <a href="https://www.tvmaze.com" target="_blank" rel="noopener noreferrer">TVmaze</a> (CC BY-SA).
   </p>
 </section>
 
@@ -167,6 +220,8 @@
   .dots { color: var(--accent); font-size: 0.8rem; line-height: 1; height: 0.8rem; letter-spacing: 1px; }
   .jump { margin-top: 0.5rem; }
   .jump input { max-width: 180px; }
+  .day { margin: 1.5rem 0 0.6rem; font-size: 1.1rem; }
+  .day.today { color: var(--accent); }
   .eps { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; }
   .eps li { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.75rem; }
   .eps li.on { opacity: 0.6; }

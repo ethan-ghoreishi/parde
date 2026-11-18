@@ -18,6 +18,8 @@ export interface CriticScore {
   value: string;
   /** Normalised 0–100 */
   score: number;
+  /** When the source last published it (Wikidata point in time, YYYY-MM) */
+  asOf?: string;
 }
 
 export interface Title {
@@ -45,6 +47,8 @@ export interface Title {
   wiki?: string;
   network?: string;
   webChannel?: string;
+  /** Country of the network or streaming service (TVmaze), absent when worldwide */
+  channelCountry?: string;
   /** TVmaze: Running, Ended, To Be Determined, In Development */
   showStatus?: string;
   /** TVmaze `updated` stamp, to skip refetching unchanged shows */
@@ -55,9 +59,13 @@ export interface Title {
   followed?: boolean;
   /** 1–5: how keen you were after the trailer (before watching) */
   expectation?: number;
+  /** When the expectation was recorded, so hindsight can be told apart */
+  expectedAt?: string;
   /** 1–10 enjoyment */
   rating?: number;
   partnerRating?: number;
+  /** What it was about for you: a few words each, chosen after watching */
+  themes?: string[];
   note?: string;
   addedAt: string;
   updatedAt: string;

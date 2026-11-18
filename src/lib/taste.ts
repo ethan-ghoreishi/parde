@@ -17,22 +17,57 @@ export function pearson(pairs: [number, number][]): number {
   return sxx && syy ? sxy / Math.sqrt(sxx * syy) : NaN;
 }
 
-/** Critics' view, 0–100: Rotten Tomatoes / Metacritic when present, else audience scores. */
-export function criticScore(t: Pick<Title, 'critics'>): { score: number; kind: 'critics' | 'audience' } | undefined {
-  const crit = t.critics.filter((c) => c.source === 'Rotten Tomatoes' || c.source === 'Metacritic');
-  if (crit.length) return { score: Math.round(mean(crit.map((c) => c.score))), kind: 'critics' };
-  const aud = t.critics.filter((c) => c.source === 'IMDb' || c.source === 'TVmaze');
-  if (aud.length) return { score: Math.round(mean(aud.map((c) => c.score))), kind: 'audience' };
-  return undefined;
+/** Spearman rank correlation: robust to the very different scales of critics' scores and yours. */
+export function spearman(pairs: [number, number][]): number {
+  const ranks = (xs: number[]) => {
+    const sorted = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
+    const r = new Array<number>(xs.length);
+    for (let i = 0; i < sorted.length; ) {
+      let j = i;
+      while (j + 1 < sorted.length && sorted[j + 1][0] === sorted[i][0]) j++;
+      for (let k = i; k <= j; k++) r[sorted[k][1]] = (i + j) / 2;
+      i = j + 1;
+    }
+    return r;
+  };
+  const a = ranks(pairs.map((p) => p[0]));
+  const b = ranks(pairs.map((p) => p[1]));
+  return pearson(a.map((x, i) => [x, b[i]]));
 }
+
+export interface Reference {
+  score: number;
+  source: string;
+  kind: 'critics' | 'audience';
+}
+
+/**
+ * The outside view of a title. Metacritic first (a weighted average of review scores), then the
+ * Tomatometer (the share of positive reviews, not a score), then audience ratings.
+ */
+export function criticScore(t: Pick<Title, 'critics'>): Reference | undefined {
+  for (const source of ['Metacritic', 'Rotten Tomatoes']) {
+    const c = t.critics.find((x) => x.source === source);
+    if (c) return { score: c.score, source, kind: 'critics' };
+  }
+  const aud = t.critics.find((x) => x.source === 'IMDb') ?? t.critics.find((x) => x.source === 'TVmaze');
+  return aud && { score: aud.score, source: aud.source, kind: 'audience' };
+}
+
+export const referenceText = (r: Reference) =>
+  r.source === 'Rotten Tomatoes' ? `${r.score}% of critics positive` : r.source === 'Metacritic' ? `Metacritic ${r.score}` : `${r.source} users ${(r.score / 10).toFixed(1)}/10`;
 
 export const rated = (titles: Title[]) => titles.filter((t) => t.rating !== undefined);
 
+/** Averages from a handful of titles are pulled toward your overall average by this many "typical" titles. */
+export const PRIOR = 3;
+
 export interface Affinity {
   key: string;
+  /** Your plain average across these titles */
   avg: number;
   n: number;
-  /** avg minus your overall average */
+  /** How far above your overall average, after allowing for how few titles there are */
   lift: number;
   titles: string[];
   qid?: string;
@@ -54,7 +89,7 @@ function group(titles: Title[], keys: (t: Title) => { key: string; qid?: string 
   }
   return [...m.entries()]
     .filter(([, g]) => g.n >= min)
-    .map(([key, g]) => ({ key, avg: g.sum / g.n, n: g.n, lift: g.sum / g.n - overall, titles: g.titles, qid: g.qid }))
+    .map(([key, g]) => ({ key, avg: g.sum / g.n, n: g.n, lift: (g.sum + PRIOR * overall) / (g.n + PRIOR) - overall, titles: g.titles, qid: g.qid }))
     .sort((a, b) => b.lift - a.lift || b.n - a.n);
 }
 
@@ -63,6 +98,7 @@ export const makerAffinity = (titles: Title[], min = 2) =>
 export const castAffinity = (titles: Title[], min = 2) =>
   group(titles, (t) => t.people.filter((p) => p.role === 'cast').map((p) => ({ key: p.name, qid: p.qid })), min);
 export const genreAffinity = (titles: Title[], min = 3) => group(titles, (t) => t.genres.map((g) => ({ key: g })), min);
+export const themeAffinity = (titles: Title[], min = 3) => group(titles, (t) => (t.themes ?? []).map((g) => ({ key: g })), min);
 
 // ---------- Choosing what to watch ----------
 
@@ -86,7 +122,7 @@ export interface PickFilter {
 }
 
 export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFilter, today = new Date()): Choice[] {
-  const makers = new Map(makerAffinity(library, 1).map((a) => [a.key, a]));
+  const makers = new Map(makerAffinity(library, 2).map((a) => [a.key, a]));
   const genres = new Map(genreAffinity(library, 2).map((a) => [a.key, a]));
   return cands
     .filter((c) => f.kind === 'any' || c.title.kind === f.kind)
@@ -103,13 +139,13 @@ export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFil
       const cs = criticScore(t);
       if (cs) {
         score += (cs.score - 70) / 15;
-        if (cs.score >= 85) reasons.push(`${cs.kind === 'critics' ? 'Critics' : 'Audiences'} rate it ${cs.score}%`);
+        if (cs.score >= 85) reasons.push(referenceText(cs));
       }
       for (const p of t.people) {
         const a = makers.get(p.name);
-        if (a && a.lift > 0.5 && p.role !== 'cast') {
+        if (a && a.lift > 0.4 && p.role !== 'cast') {
           score += Math.min(a.lift, 2);
-          reasons.push(`${p.name}: you average ${a.avg.toFixed(1)} across ${a.n}`);
+          reasons.push(`${p.name}: you rated their other ${a.n} ${a.avg.toFixed(1)} on average`);
           break;
         }
       }
@@ -138,29 +174,49 @@ export interface Gap {
   ref: number;
 }
 
+/** An expectation recorded after the viewing is hindsight, not a prediction. */
+export const beforeWatching = (t: Title) => !(t.expectedAt && t.finishedAt && t.expectedAt.slice(0, 10) > t.finishedAt.slice(0, 10));
+
 /** Expectation 1–5 against enjoyment 1–10, both mapped to 0–100. */
 export function trailerInstinct(titles: Title[]) {
-  const pairs = titles.filter((t) => t.expectation && t.rating !== undefined);
+  const pairs = titles.filter((t) => t.expectation && t.rating !== undefined && beforeWatching(t));
+  const avg = mean(rated(titles).map((t) => t.rating!));
   const gaps: Gap[] = pairs.map((t) => ({ title: t, ref: (t.expectation! - 1) * 25, gap: (t.rating! - 1) * (100 / 9) - (t.expectation! - 1) * 25 }));
+  const keen = pairs.filter((t) => t.expectation! >= 4);
+  const unsure = pairs.filter((t) => t.expectation! <= 2);
   return {
     n: pairs.length,
-    r: pearson(pairs.map((t) => [t.expectation!, t.rating!])),
+    r: spearman(pairs.map((t) => [t.expectation!, t.rating!])),
+    /** Plain counts read better than a coefficient while there are few titles */
+    keen: { n: keen.length, above: keen.filter((t) => t.rating! > avg).length },
+    unsure: { n: unsure.length, above: unsure.filter((t) => t.rating! > avg).length },
     surprises: gaps.filter((g) => g.gap >= 25).sort((a, b) => b.gap - a.gap).slice(0, 5),
     letdowns: gaps.filter((g) => g.gap <= -25).sort((a, b) => a.gap - b.gap).slice(0, 5),
   };
 }
 
+/**
+ * You against the critics, one source at a time. A level comparison ("warmer by N points") only for
+ * Metacritic; with the Tomatometer only rank agreement and clear disagreements make sense.
+ */
 export function versusCritics(titles: Title[]) {
-  const rows = rated(titles)
-    .map((t) => ({ t, cs: criticScore(t) }))
-    .filter((x) => x.cs?.kind === 'critics')
-    .map(({ t, cs }) => ({ title: t, ref: cs!.score, gap: t.rating! * 10 - cs!.score }));
+  const rows = (source: string) =>
+    rated(titles).flatMap((t) => {
+      const c = t.critics.find((x) => x.source === source);
+      return c ? [{ title: t, ref: c.score, gap: t.rating! * 10 - c.score }] : [];
+    });
+  const mc = rows('Metacritic');
+  const rt = rows('Rotten Tomatoes');
+  const source = mc.length >= 5 || mc.length >= rt.length ? 'Metacritic' : 'Rotten Tomatoes';
+  const use = source === 'Metacritic' ? mc : rt;
+  const isMc = source === 'Metacritic';
   return {
-    n: rows.length,
-    meanGap: mean(rows.map((r) => r.gap)),
-    r: pearson(rows.map((r) => [r.ref, r.title.rating!])),
-    warmer: rows.filter((r) => r.gap >= 15).sort((a, b) => b.gap - a.gap).slice(0, 5),
-    colder: rows.filter((r) => r.gap <= -15).sort((a, b) => a.gap - b.gap).slice(0, 5),
+    source,
+    n: use.length,
+    meanGap: isMc ? mean(use.map((r) => r.gap)) : NaN,
+    r: spearman(use.map((r) => [r.ref, r.title.rating!])),
+    warmer: use.filter((r) => (isMc ? r.gap >= 15 : r.title.rating! >= 8 && r.ref <= 60)).sort((a, b) => b.gap - a.gap).slice(0, 5),
+    colder: use.filter((r) => (isMc ? r.gap <= -15 : r.title.rating! <= 5 && r.ref >= 85)).sort((a, b) => a.gap - b.gap).slice(0, 5),
   };
 }
 

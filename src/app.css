@@ -36,9 +36,18 @@
 
 * { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+#app { height: 100%; height: 100dvh; display: flex; flex-direction: column; }
+
+/*
+ * App shell: the document itself never scrolls; only the content area between header and tab bar does.
+ * On iOS Safari the toolbar collapses and expands with document scrolling, which moved a fixed tab bar
+ * up and down depending on how long each page was. With no document scrolling there is nothing to move.
+ */
+html { -webkit-text-size-adjust: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
 
 body {
+  height: 100%;
+  overflow: hidden;
   margin: 0;
   background: var(--bg);
   color: var(--text);

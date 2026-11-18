@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { db, getSetting, setSetting, type Link } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { buildBackup, download, parseBackup, restore, type Backup } from '../lib/backup';
+  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, UNDO_KEY, type Backup } from '../lib/backup';
   import { moveDomain, persistStorage } from '../lib/actions';
   import { hostOf } from '../lib/links';
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
@@ -13,11 +13,12 @@
     () => async () => ({
       lastBackup: await getSetting<string>('lastBackupAt', ''),
       partner: await getSetting('partner', ''),
-      sites: await getSetting<Site[]>('sites', DEFAULT_SITES),
+      sites: (await getSetting<Site[]>('sites', DEFAULT_SITES)).filter(validSite),
+      undoAt: (await getSetting<{ at?: string } | null>(UNDO_KEY, null))?.at ?? '',
       links: await db.links.toArray(),
       count: await db.titles.count(),
     }),
-    { lastBackup: '', partner: '', sites: DEFAULT_SITES, links: [] as Link[], count: 0 },
+    { lastBackup: '', partner: '', sites: DEFAULT_SITES, undoAt: '', links: [] as Link[], count: 0 },
   );
 
   let persisted = $state<boolean | null>(null);
@@ -28,13 +29,20 @@
   async function exportNow() {
     try {
       const b = await buildBackup();
-      download(b);
-      await setSetting('lastBackupAt', b.exportedAt);
-      persistStorage();
-      toast('Backup downloaded. Keep it somewhere safe (iCloud Drive, NAS…).');
+      const r = await saveBackup(b);
+      if (r === 'cancelled') return toast('Backup not saved', 'error');
+      // Safari can refuse a share that did not start straight from a tap: offer one.
+      if (r === 'blocked') return toast('Backup ready', 'ok', { label: 'Save', run: async () => (await shareBackup(b)) === 'saved' && saved(b) });
+      await saved(b);
     } catch (e) {
       toast(errorText(e), 'error');
     }
+  }
+
+  async function saved(b: Backup) {
+    await setSetting('lastBackupAt', b.exportedAt);
+    persistStorage();
+    toast('Backup saved. Keep it somewhere safe (iCloud Drive, NAS…).');
   }
 
   let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string } | null>(null);
@@ -53,11 +61,19 @@
 
   async function apply(mode: 'merge' | 'replace') {
     if (!pending) return;
-    if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? Anything added here since that backup will be lost. Download a backup of the current data first if unsure.`)) return;
+    if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? What is here now is kept aside so you can undo this straight afterwards.`)) return;
     try {
       await restore(pending.backup, mode);
-      toast(mode === 'merge' ? 'Backup merged in' : 'Restored from backup');
+      toast(mode === 'merge' ? 'Backup merged in' : 'Restored from backup', 'ok', { label: 'Undo', run: undo });
       pending = null;
+    } catch (e) {
+      toast(`Nothing was changed: ${errorText(e)}`, 'error');
+    }
+  }
+
+  async function undo() {
+    try {
+      toast((await undoRestore()) ? 'Put back what was here before the restore' : 'Nothing to undo');
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
     }
@@ -112,7 +128,7 @@
     {#if persisted === true}Storage is protected from automatic clearing.{:else if persisted === false}The browser may clear storage under pressure: install Parde or back up regularly.{/if}
   </p>
   <div class="row">
-    <button class="primary" onclick={exportNow}>Download backup</button>
+    <button class="primary" onclick={exportNow}>Save a backup</button>
     <label class="btn file">Restore from file…<input type="file" accept="application/json,.json" onchange={pick} /></label>
   </div>
   {#if importError}<p class="small" style="color: var(--danger)" role="alert">{importError}</p>{/if}
@@ -124,12 +140,21 @@
         <button class="danger" onclick={() => apply('replace')}>Replace everything</button>
         <button class="ghost" onclick={() => (pending = null)}>Cancel</button>
       </div>
-      <p class="small muted">Merge keeps everything here and adds what is missing; where both have the same title, the more recently edited version wins.</p>
+      <p class="small muted">Merge keeps everything here and adds what is missing; where both have the same title, the more recently edited version wins. Either way you can undo it afterwards.</p>
     </div>
+  {/if}
+  {#if data.value.undoAt && !pending}
+    <p class="small muted">Restored {ago(data.value.undoAt)}. <button class="small" onclick={undo}>Undo that restore</button></p>
   {/if}
   {#if ios}
     <p class="small muted">On iPhone and iPad, tap Share → Add to Home Screen. Safari can clear data for websites you have not opened for a while; the installed app is kept.</p>
   {/if}
+</section>
+
+<section class="section card stack">
+  <h2>Import</h2>
+  <p class="small">Bring in your history from Letterboxd, IMDb or a typed list, with ratings and where you are in series.</p>
+  <a class="btn" href="#/import">Import ratings and history…</a>
 </section>
 
 <section class="section card stack">

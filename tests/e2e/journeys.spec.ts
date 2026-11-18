@@ -5,26 +5,52 @@ const wd = JSON.parse(readFileSync('tests/fixtures/wd-dune2.json', 'utf8'));
 const sev = JSON.parse(readFileSync('tests/fixtures/tvm-severance.json', 'utf8'));
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
+const heat = { ...wd, id: 'Q42198', labels: { en: { value: 'Heat', language: 'en' } }, sitelinks: { enwiki: { site: 'enwiki', title: 'Heat (1995 film)' } } };
+const WD_ENTITIES: Record<string, unknown> = { Q109228991: wd, Q42198: heat };
+const sparqlRow = (o: Record<string, string>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { value: v }]));
+
 /** Every external API is stubbed: tests never depend on live services. */
 async function stub(page: Page) {
-  await page.route(/en\.wikipedia\.org\/w\/api\.php/, (r) =>
-    r.fulfill({
-      json: { query: { pages: [{ index: 1, title: 'Dune: Part Two', description: '2024 film by Denis Villeneuve', pageprops: { wikibase_item: 'Q109228991' } }] } },
-    }),
-  );
-  await page.route(/rest_v1\/page\/summary/, (r) =>
-    r.fulfill({ json: { thumbnail: { source: 'https://upload.wikimedia.org/poster.png' }, extract: 'Paul Atreides unites with the Fremen.', wikibase_item: 'Q109228991' } }),
-  );
+  await page.route(/en\.wikipedia\.org\/w\/api\.php/, (r) => {
+    const u = new URL(r.request().url());
+    const titles = u.searchParams.get('titles');
+    if (titles) {
+      // Posters and opening paragraphs for known articles
+      return r.fulfill({ json: { query: { pages: titles.split('|').map((title) => ({ title, thumbnail: { source: 'https://upload.wikimedia.org/poster.png?utm_source=x' }, extract: `${title}: a film.` })) } } });
+    }
+    return r.fulfill({
+      json: { query: { pages: [{ index: 1, title: 'Dune: Part Two', description: '2024 film by Denis Villeneuve', pageprops: { wikibase_item: 'Q109228991' }, thumbnail: { source: 'https://upload.wikimedia.org/poster.png' } }] } },
+    });
+  });
   await page.route(/upload\.wikimedia\.org|static\.tvmaze\.com/, (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
   await page.route(/www\.wikidata\.org\/w\/api\.php/, (r) => {
     const u = new URL(r.request().url());
     if (u.searchParams.get('list') === 'search') return r.fulfill({ json: { query: { search: [] } } });
+    if (u.searchParams.get('action') === 'wbsearchentities') {
+      return r.fulfill({ json: { search: [{ id: 'Q548823', label: 'Denis Villeneuve', description: 'Canadian film director (born 1967)' }] } });
+    }
     const ids = u.searchParams.get('ids')!.split('|');
-    if (ids[0] === 'Q109228991') return r.fulfill({ json: { entities: { Q109228991: wd } } });
     const names: Record<string, string> = { Q548823: 'Denis Villeneuve' };
-    return r.fulfill({ json: { entities: Object.fromEntries(ids.map((id) => [id, { labels: { en: { value: names[id] ?? `Label ${id}` } } }])) } });
+    return r.fulfill({
+      json: { entities: Object.fromEntries(ids.map((id) => [id, WD_ENTITIES[id] ?? { labels: { en: { value: names[id] ?? `Label ${id}` } }, descriptions: { en: { value: 'Canadian film director' } }, sitelinks: {} }])) },
+    });
+  });
+  await page.route(/query\.wikidata\.org\/sparql/, (r) => {
+    const q = new URL(r.request().url()).searchParams.get('query')!;
+    if (q.includes('wikibase:sitelinks')) {
+      return r.fulfill({ json: { results: { bindings: [
+        sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q42198', type: 'http://www.wikidata.org/entity/Q11424', links: '80', y: '1995' }),
+        sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q1', type: 'http://www.wikidata.org/entity/Q11424', links: '5', y: '1972' }),
+      ] } } });
+    }
+    // A person's filmography
+    return r.fulfill({ json: { results: { bindings: [
+      sparqlRow({ w: 'http://www.wikidata.org/entity/Q109228991', wLabel: 'Dune: Part Two', prop: 'http://www.wikidata.org/prop/direct/P57', type: 'http://www.wikidata.org/entity/Q11424', person: 'http://www.wikidata.org/entity/Q548823', y: '2024', article: 'https://en.wikipedia.org/wiki/Dune:_Part_Two' }),
+      sparqlRow({ w: 'http://www.wikidata.org/entity/Q42198', wLabel: 'Heat', prop: 'http://www.wikidata.org/prop/direct/P57', type: 'http://www.wikidata.org/entity/Q11424', person: 'http://www.wikidata.org/entity/Q548823', y: '1995', article: 'https://en.wikipedia.org/wiki/Heat_(1995_film)' }),
+    ] } } });
   });
   await page.route(/api\.tvmaze\.com\/search\/shows/, (r) => r.fulfill({ json: [{ show: sev }] }));
+  await page.route(/api\.tvmaze\.com\/lookup\/shows/, (r) => r.fulfill({ json: sev }));
   await page.route(/api\.tvmaze\.com\/shows\/44933/, (r) => r.fulfill({ json: sev }));
   await page.route(/api\.tvmaze\.com\/updates/, (r) => r.fulfill({ json: {} }));
   // Viewing sites open in new tabs: serve a blank page so the URL can be checked.
@@ -33,11 +59,13 @@ async function stub(page: Page) {
 
 async function search(page: Page, q: string) {
   await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await page.getByPlaceholder('Search by title…').fill(q);
+  await page.getByPlaceholder('Title or person…').fill(q);
 }
 
 test.beforeEach(async ({ page }) => {
   await stub(page);
+  // Phones get the share sheet for backups; tests take the download path everywhere.
+  await page.addInitScript(() => Object.defineProperty(navigator, 'canShare', { value: undefined }));
   await page.goto('./');
 });
 
@@ -83,6 +111,71 @@ test('want a film, record trailer keenness, log a watch with partner rating', as
   await expect(page.getByRole('button', { name: 'Watched', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByText(/together/)).toBeVisible();
   await expect(page.getByText('Sara', { exact: true })).toBeVisible();
+  // Hindsight cannot change the expectation any more
+  await expect(page.getByText(/Before watching you were keen/)).toBeVisible();
+
+  // Themes in a tap, then a review prompt built only from what was said
+  await page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' }).click();
+  await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByText('See the prompt').click();
+  const prompt = page.locator('.assist pre');
+  await expect(prompt).toContainText('My rating: 6/10 (Sara: 9/10)');
+  await expect(prompt).toContainText('What it was about for me: memory');
+  await expect(prompt).toContainText('Do not invent opinions');
+});
+
+test('a series already part-watched is placed in one step, and Tonight resumes there', async ({ page }) => {
+  await search(page, 'severance');
+  const row = page.locator('li.hit', { hasText: 'Severance' });
+  await row.getByRole('button', { name: 'Watching' }).click();
+  await row.getByLabel('Where are you up to?').selectOption({ label: 'S01E09 · end of season 1' });
+  await expect(page.getByRole('status')).toContainText('Seen up to S01E09');
+  await row.getByRole('button', { name: 'Open' }).click();
+  await expect(page.locator('.next-ep')).toContainText('S02E01');
+  await page.getByRole('link', { name: 'Tonight' }).first().click();
+  await expect(page.locator('.continue li', { hasText: 'Severance' })).toContainText('S02E01');
+});
+
+test('discover through people: a director’s filmography, one tap to want', async ({ page }) => {
+  await search(page, 'dune');
+  await page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByRole('button', { name: 'Seen' }).click();
+  await page.locator('li.hit').getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('link', { name: 'Denis Villeneuve' }).click();
+  await expect(page.getByRole('heading', { name: 'Denis Villeneuve', level: 1 })).toBeVisible();
+  await expect(page.getByText('In your library')).toBeVisible();
+  const heatRow = page.locator('.work li', { hasText: 'Heat' });
+  await heatRow.getByRole('button', { name: 'Want' }).click();
+  await expect(heatRow).toContainText('On your list');
+  // People are also searchable directly
+  await search(page, 'villeneuve');
+  await expect(page.getByRole('link', { name: /Denis Villeneuve/ })).toBeVisible();
+});
+
+test('import a typed list: exact matches go straight in, series land where you are', async ({ page }) => {
+  await page.goto('./#/import');
+  await page.getByLabel(/type or paste a list/).fill('Heat 1995 9\nSeverance S01E05');
+  await page.getByRole('button', { name: 'Find 2 titles' }).click();
+  await expect(page.getByText(/2\s*ready/)).toBeVisible();
+  await page.getByRole('button', { name: 'Add 2 titles' }).click();
+  await expect(page.getByRole('heading', { name: 'Done' })).toBeVisible();
+  await expect(page.getByText('Added 2')).toBeVisible();
+  await page.goto('./#/library');
+  await expect(page.locator('.tile', { hasText: 'Heat' })).toContainText('9');
+  await page.locator('.tile', { hasText: 'Severance' }).click();
+  await expect(page.locator('.next-ep')).toContainText('S01E06');
+});
+
+test('calendar groups a season drop and says where the date comes from', async ({ page }) => {
+  await search(page, 'severance');
+  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
+  await page.keyboard.press('Escape');
+  await page.goto('./#/calendar?d=2022-02-18');
+  const card = page.locator('.eps li', { hasText: 'Severance' }).first();
+  await expect(card).toContainText('S01E01–E02 · 2 episodes');
+  await expect(card).toContainText('Released on Apple TV');
+  await expect(card).toContainText('No source saved');
+  await card.getByRole('button', { name: 'All seen' }).click();
+  await expect(card).toContainText('All seen');
 });
 
 test('follow a series: pattern source, resume from Tonight, broken-link fallback', async ({ page }) => {
@@ -132,7 +225,7 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   await page.keyboard.press('Escape');
   await page.goto('./#/settings');
 
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download backup' }).click()]);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save a backup' }).click()]);
   const path = await dl.path();
   const text = readFileSync(path, 'utf8');
   expect(JSON.parse(text)).toMatchObject({ app: 'parde', schemaVersion: 1 });
@@ -154,10 +247,26 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   await fresh.close();
 });
 
-test('no horizontal scroll on key pages', async ({ page }) => {
-  for (const p of ['./', './#/calendar', './#/library', './#/taste', './#/settings']) {
+test('layout: no horizontal scroll, the page itself never scrolls, the tab bar stays at the bottom', async ({ page, isMobile }) => {
+  await search(page, 'severance');
+  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
+  await page.keyboard.press('Escape');
+  for (const p of ['./', './#/calendar', './#/library', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
     await page.goto(p);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    expect(overflow, p).toBeLessThanOrEqual(0);
+    await page.waitForTimeout(150);
+    const m = await page.evaluate(() => {
+      const sc = document.getElementById('scroller')!;
+      return {
+        docX: document.documentElement.scrollWidth - innerWidth,
+        docY: document.documentElement.scrollHeight - innerHeight,
+        innerX: sc.scrollWidth - sc.clientWidth,
+        nav: Math.round(document.querySelector('nav.bottom')!.getBoundingClientRect().bottom) - innerHeight,
+      };
+    });
+    expect(m.docX, p).toBeLessThanOrEqual(0);
+    expect(m.innerX, p).toBeLessThanOrEqual(0);
+    // Safari moves its toolbar with document scrolling; a document that cannot scroll keeps the tab bar put.
+    expect(m.docY, p).toBeLessThanOrEqual(0);
+    if (isMobile) expect(m.nav, p).toBe(0);
   }
 });

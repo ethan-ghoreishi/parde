@@ -35,9 +35,9 @@
           <span class="muted small">{done}/{eps.length} seen</span>
         </button>
         {#if openSeasons.has(s)}
-          {#if done < eps.length}
-            <button class="small ghost" onclick={() => setSeasonSeen(title.id, s, true)}>Mark season seen</button>
-          {:else}
+          {#if eps.some((e) => !seen.has(e.id) && isAired(e))}
+            <button class="small ghost" onclick={() => setSeasonSeen(title.id, s, true)}>Mark {eps.every((e) => isAired(e)) ? 'season' : 'all out so far'} seen</button>
+          {:else if done}
             <button class="small ghost" onclick={() => setSeasonSeen(title.id, s, false)}>Unmark season</button>
           {/if}
         {/if}
@@ -67,7 +67,7 @@
                       <button class="small ghost" onclick={() => (revealed = new Set([...revealed, e.id]))}>Show summary (may spoil)</button>
                     {/if}
                   {/if}
-                  {#if !on}
+                  {#if !on && aired}
                     <button class="small" onclick={() => seenUpTo(e)}>Seen everything up to here</button>
                   {/if}
                   <Sources {title} {links} season={e.season} episode={e.number} heading="Sources for {code(e)}" />
