@@ -1,11 +1,11 @@
 <script lang="ts">
   import { ui, toast, errorText } from '../lib/ui.svelte';
-  import { searchFilms, wikiSummary, type FilmHit } from '../lib/api/wiki';
+  import { searchFilms, type FilmHit, type PersonHit } from '../lib/api/wiki';
   import { searchShows, type ShowHit } from '../lib/api/tvmaze';
   import { addFilm, addShow, update, setExpectation, seenAllAired } from '../lib/actions';
   import { db, type Status } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { titleHref, go } from '../lib/router.svelte';
+  import { titleHref, personHref, go } from '../lib/router.svelte';
   import Poster from './Poster.svelte';
   import Scale from './Scale.svelte';
   import ProgressPicker from './ProgressPicker.svelte';
@@ -15,7 +15,7 @@
   let input = $state<HTMLInputElement>();
   let films = $state<FilmHit[]>([]);
   let shows = $state<ShowHit[]>([]);
-  let posters = $state<Record<string, string>>({});
+  let people = $state<PersonHit[]>([]);
   let loading = $state(false);
   let error = $state('');
   let busy = $state<string | null>(null);
@@ -55,6 +55,7 @@
     if (q.length < 2) {
       films = [];
       shows = [];
+      people = [];
       error = '';
       return;
     }
@@ -63,21 +64,16 @@
     const [f, s] = await Promise.allSettled([searchFilms(q), searchShows(q)]);
     if (mine !== seq) return;
     loading = false;
-    films = f.status === 'fulfilled' ? f.value.slice(0, 8) : [];
+    films = f.status === 'fulfilled' ? f.value.films.slice(0, 8) : [];
+    people = f.status === 'fulfilled' ? f.value.people : [];
     shows = s.status === 'fulfilled' ? s.value.slice(0, 6) : [];
     if (f.status === 'rejected' && s.status === 'rejected') error = errorText(f.reason);
-    for (const hit of films) {
-      if (posters[hit.qid] === undefined) {
-        posters[hit.qid] = '';
-        wikiSummary(hit.wiki).then((x) => x.poster && (posters[hit.qid] = x.poster)).catch(() => {});
-      }
-    }
   }
 
   async function add(kind: 'film' | 'show', key: string | number, status: Status) {
     busy = `${key}`;
     try {
-      const id = kind === 'film' ? await addFilm(key as string, films.find((f) => f.qid === key)?.wiki) : await addShow(key as number);
+      const id = kind === 'film' ? await addFilm(key as string) : await addShow(key as number);
       if (status !== 'want') {
         if (kind === 'show' && status === 'watched') {
           // "Seen all" of a running show means caught up: it stays in progress for the next season.
@@ -112,7 +108,7 @@
       <button class="ghost icon" onclick={() => (ui.searchOpen = false)} aria-label="Close">✕</button>
     </div>
     <label class="sr-only" for="q">Title</label>
-    <input id="q" type="search" bind:this={input} bind:value={ui.searchQuery} oninput={onInput} placeholder="Search by title…" autocomplete="off" enterkeyhint="search" onkeydown={(e) => e.key === 'Enter' && (clearTimeout(timer), run())} />
+    <input id="q" type="search" bind:this={input} bind:value={ui.searchQuery} oninput={onInput} placeholder="Title or person…" autocomplete="off" enterkeyhint="search" onkeydown={(e) => e.key === 'Enter' && (clearTimeout(timer), run())} />
 
     <div class="results" aria-live="polite" aria-busy={loading}>
       {#if loading}<p class="muted small">Searching…</p>{/if}
@@ -163,7 +159,7 @@
         <h3 class="sub">Films</h3>
         <ul>
           {#each films as f (f.qid)}
-            {@render hitRow(`wd:${f.qid}`, 'film', f.qid, f.name, f.description, posters[f.qid] || undefined, f.year)}
+            {@render hitRow(`wd:${f.qid}`, 'film', f.qid, f.name, f.description, f.poster, f.year)}
           {/each}
         </ul>
       {/if}
@@ -175,11 +171,19 @@
           {/each}
         </ul>
       {/if}
-      {#if !loading && !error && ui.searchQuery.trim().length >= 2 && !films.length && !shows.length}
-        <p class="muted small">Nothing found. Try the original title, or fewer words.</p>
+      {#if people.length}
+        <h3 class="sub">People</h3>
+        <ul class="people">
+          {#each people as p (p.qid)}
+            <li><a href={personHref(p.qid, p.name)}><strong>{p.name}</strong> <span class="muted small">{p.description}</span></a></li>
+          {/each}
+        </ul>
+      {/if}
+      {#if !loading && !error && ui.searchQuery.trim().length >= 2 && !films.length && !shows.length && !people.length}
+        <p class="muted small">Nothing found. Try the original title, fewer words, or add the year (e.g. “Heat 1995”).</p>
       {/if}
     </div>
-    <p class="muted small credit">Films from Wikipedia & Wikidata, series from TVmaze.</p>
+    <p class="muted small credit">Search titles or people (directors, writers, actors). Films from Wikipedia & Wikidata, series from TVmaze.</p>
   </div>
 </dialog>
 
@@ -194,6 +198,8 @@
   .acts { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; align-items: center; max-width: 45%; }
   .follow { margin-top: 0.4rem; display: grid; gap: 0.3rem; }
   .credit { margin: 1rem 0 0; }
+  .people li { border-bottom: 1px solid var(--line); }
+  .people a { display: block; padding: 0.6rem 0; color: var(--text); text-decoration: none; }
   @media (max-width: 520px) {
     .hit { flex-wrap: wrap; }
     .acts { max-width: none; width: 100%; justify-content: flex-start; padding-left: calc(48px + 0.75rem); }

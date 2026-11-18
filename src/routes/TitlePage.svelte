@@ -6,9 +6,9 @@
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
   import { EXPECTATIONS, criticScore, referenceText } from '../lib/taste';
-  import { questionsFor, reflectPrompt, recapPrompt, claudeUrl } from '../lib/handoff';
+  import { questionsFor, reflectPrompt, reviewPrompt, recapPrompt, claudeUrl, chatgptUrl, type ReviewOptions } from '../lib/handoff';
   import { toast, errorText, copy } from '../lib/ui.svelte';
-  import { go } from '../lib/router.svelte';
+  import { go, personHref } from '../lib/router.svelte';
   import { editLink } from '../lib/actions';
   import { now } from '../lib/db';
   import Poster from '../components/Poster.svelte';
@@ -17,6 +17,7 @@
   import Episodes from '../components/Episodes.svelte';
   import LogWatch from '../components/LogWatch.svelte';
   import ProgressPicker from '../components/ProgressPicker.svelte';
+  import Themes from '../components/Themes.svelte';
 
   let { id }: { id: string } = $props();
 
@@ -26,6 +27,7 @@
   const seenQ = live(() => () => db.seen.where('titleId').equals(id).primaryKeys(), [] as number[]);
   const watchesQ = live(() => () => db.watches.where('titleId').equals(id).reverse().sortBy('date'), []);
   const partnerQ = live(() => () => getSetting('partner', ''), '');
+  const libraryQ = live(() => () => db.titles.toArray(), [] as Title[]);
 
   const t = $derived(titleQ.value);
   const seen = $derived(new Set(seenQ.value));
@@ -39,7 +41,7 @@
   // One line per person: "Denis Villeneuve — director, writer"
   const makers = $derived(
     [...(t?.people.filter((p) => p.role !== 'cast') ?? []).reduce((m, p) => m.set(p.name, [...(m.get(p.name) ?? []), p.role]), new Map<string, string[]>())]
-      .map(([name, roles]) => ({ name, role: roles.join(', ') })),
+      .map(([name, roles]) => ({ name, role: roles.join(', '), qid: t?.people.find((p) => p.name === name && p.qid)?.qid })),
   );
   const cast = $derived(t?.people.filter((p) => p.role === 'cast') ?? []);
   // Once you have watched it, "how keen were you?" would be hindsight: keep it as it was.
@@ -108,6 +110,21 @@
   function handoff(prompt: string) {
     copy(prompt);
     window.open(claudeUrl(prompt), '_blank', 'noopener,noreferrer');
+  }
+
+  // ----- After watching: a review or a deeper look, written by an assistant of your choice -----
+  let mode = $state<'review' | 'reflect'>('review');
+  let opts = $state<ReviewOptions>({ length: 'short', spoilers: false });
+  const reflectable = $derived(!!t && (t.status === 'watched' || t.status === 'watching' || t.rating !== undefined));
+  const prompt = $derived.by(() => {
+    if (!t) return '';
+    const cur = { ...t, note: note ?? t.note };
+    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts, partnerQ.value) : reflectPrompt(cur, libraryQ.value, partnerQ.value);
+  });
+  function send(where: 'copy' | 'claude' | 'chatgpt') {
+    saveNote();
+    copy(prompt);
+    if (where !== 'copy') window.open((where === 'claude' ? claudeUrl : chatgptUrl)(prompt), '_blank', 'noopener,noreferrer');
   }
 
   const trailerSearch = $derived(t ? `https://www.youtube.com/results?search_query=${encodeURIComponent(`${t.name} ${t.year ?? ''} ${t.kind === 'show' ? 'season 1 ' : ''}official trailer`)}` : '');
@@ -230,15 +247,39 @@
 
         <section class="section">
           <h2>Thoughts</h2>
-          {#if t.status === 'watched' || t.status === 'watching'}
+          {#if reflectable}
+            <p class="small muted" style="margin-bottom: 0.4rem">What was it about for you? Tap any that fit.</p>
+            <Themes title={t} />
             <ul class="questions small muted">
               {#each questionsFor(t.id) as q}<li>{q}</li>{/each}
             </ul>
           {/if}
           <label class="sr-only" for="note">Your notes</label>
-          <textarea id="note" value={note ?? t.note ?? ''} oninput={(e) => { note = e.currentTarget.value; onNote(); }} onblur={saveNote} placeholder="What stayed with you? Interpretations, moments, arguments you had about it…"></textarea>
-          {#if t.status === 'watched' || t.status === 'watching'}
-            <button class="small" style="margin-top: 0.5rem" onclick={() => { saveNote(); handoff(reflectPrompt({ ...t, note: note ?? t.note })); }}>Think it through with Claude ↗</button>
+          <textarea id="note" value={note ?? t.note ?? ''} oninput={(e) => { note = e.currentTarget.value; onNote(); }} onblur={saveNote} placeholder="A few words are enough: moments, arguments you had about it, what it made you think…"></textarea>
+          {#if reflectable}
+            <div class="assist card">
+              <div class="row" role="group" aria-label="Prompt">
+                <button class="chip" class:on={mode === 'review'} aria-pressed={mode === 'review'} onclick={() => (mode = 'review')}>Draft my review</button>
+                <button class="chip" class:on={mode === 'reflect'} aria-pressed={mode === 'reflect'} onclick={() => (mode = 'reflect')}>Explore interpretations</button>
+              </div>
+              {#if mode === 'review'}
+                <div class="row small">
+                  <button class="chip" class:on={opts.length === 'short'} aria-pressed={opts.length === 'short'} onclick={() => (opts.length = 'short')}>Short</button>
+                  <button class="chip" class:on={opts.length === 'full'} aria-pressed={opts.length === 'full'} onclick={() => (opts.length = 'full')}>Full</button>
+                  <label class="row spoil"><input type="checkbox" bind:checked={opts.spoilers} /> Spoilers allowed</label>
+                </div>
+              {/if}
+              <div class="row">
+                <button class="small primary" onclick={() => send('copy')}>Copy prompt</button>
+                <button class="small" onclick={() => send('claude')}>Open Claude ↗</button>
+                <button class="small" onclick={() => send('chatgpt')}>Open ChatGPT ↗</button>
+              </div>
+              <details>
+                <summary class="small muted">See the prompt</summary>
+                <pre class="small">{prompt}</pre>
+              </details>
+              <p class="small muted">Built only from your rating, themes and notes; it asks the assistant not to invent opinions and to mark guesses. The prompt is copied, so paste it if the page opens empty. {mode === 'review' ? 'Paste its closing “Themes:” line into your own word box above.' : ''}</p>
+            </div>
           {/if}
         </section>
 
@@ -270,9 +311,10 @@
         {#if makers.length || cast.length}
           <section class="section">
             <h2>People</h2>
+            <p class="small muted">Tap a name for their other work.</p>
             <ul class="people small">
-              {#each makers as p}<li><a href="#/library?person={encodeURIComponent(p.name)}">{p.name}</a> <span class="muted">{p.role}</span></li>{/each}
-              {#each cast.filter((c) => !makers.some((m) => m.name === c.name)) as p}<li><a href="#/library?person={encodeURIComponent(p.name)}">{p.name}</a></li>{/each}
+              {#each makers as p}<li><a href={personHref(p.qid, p.name)}>{p.name}</a> <span class="muted">{p.role}</span></li>{/each}
+              {#each cast.filter((c) => !makers.some((m) => m.name === c.name)) as p}<li><a href={personHref(p.qid, p.name)}>{p.name}</a></li>{/each}
             </ul>
           </section>
         {/if}
@@ -320,7 +362,10 @@
   .next { display: grid; gap: 0.5rem; }
   .next-ep { font-size: 1.1rem; }
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 2rem; }
-  .questions { margin: 0 0 0.75rem; padding-left: 1.2rem; }
+  .questions { margin: 0.75rem 0; padding-left: 1.2rem; }
+  .assist { display: grid; gap: 0.6rem; margin-top: 0.75rem; }
+  .assist pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2); padding: 0.75rem; border-radius: 8px; max-height: 18rem; overflow: auto; }
+  .spoil { margin: 0; gap: 0.35rem; color: var(--text); }
   .people, .history { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
   .people a { color: var(--text); }
   .follow { color: var(--text); margin: 0; gap: 0.4rem; }

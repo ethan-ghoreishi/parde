@@ -1,6 +1,6 @@
 import type { Episode, Person } from '../db';
-import { getJson, stripHtml } from './http';
-import type { Meta } from './wiki';
+import { getJson, NetError, stripHtml } from './http';
+import { rankHits, splitYear, type Meta } from './wiki';
 
 const API = 'https://api.tvmaze.com';
 
@@ -48,8 +48,8 @@ export interface ShowHit {
 }
 
 export async function searchShows(q: string): Promise<ShowHit[]> {
-  const res = await getJson<{ show: TvmShow }[]>(`${API}/search/shows?q=${encodeURIComponent(q)}`);
-  return res.map(({ show: s }) => ({
+  const res = await getJson<{ show: TvmShow }[]>(`${API}/search/shows?q=${encodeURIComponent(splitYear(q).text)}`);
+  return rankHits(q, res.map(({ show: s }) => ({
     tvmaze: s.id,
     name: s.name,
     year: s.premiered ? Number(s.premiered.slice(0, 4)) : undefined,
@@ -57,7 +57,24 @@ export async function searchShows(q: string): Promise<ShowHit[]> {
     description: [s.premiered?.slice(0, 4), s.network?.name ?? s.webChannel?.name, s.status === 'Ended' ? 'ended' : '']
       .filter(Boolean)
       .join(' · '),
-  }));
+  })));
+}
+
+/** The TVmaze show for an IMDb id, or undefined if TVmaze does not list it. */
+export async function showForImdb(imdb: string): Promise<number | undefined> {
+  try {
+    return (await getJson<TvmShow>(`${API}/lookup/shows?imdb=${encodeURIComponent(imdb)}`)).id;
+  } catch (e) {
+    if (e instanceof NetError && e.status === 404) return undefined;
+    throw e;
+  }
+}
+
+/** Best TVmaze match for a series known only by name (and maybe year): exact name, then year. */
+export async function findShow(name: string, year?: number): Promise<number | undefined> {
+  const hits = await searchShows(year ? `${name} ${year}` : name);
+  const k = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return hits.find((h) => k(h.name) === k(name) && (!year || !h.year || Math.abs(h.year - year) <= 1))?.tvmaze;
 }
 
 export function toEpisode(titleId: string, e: TvmEpisode): Episode | null {

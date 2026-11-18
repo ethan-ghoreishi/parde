@@ -17,3 +17,5 @@ export const go = (to: string) => {
 };
 
 export const titleHref = (id: string) => `#/t/${encodeURIComponent(id)}`;
+/** A person by Wikidata id when known, else by name (TVmaze cast have no Wikidata id). */
+export const personHref = (qid: string | undefined, name: string) => `#/p?${new URLSearchParams(qid ? { q: qid, name } : { name })}`;

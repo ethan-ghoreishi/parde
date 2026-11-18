@@ -1,5 +1,6 @@
 import type { Episode, Title } from './db';
 import { code } from './schedule';
+import { EXPECTATIONS, criticScore, referenceText, makerAffinity, rated, mean, beforeWatching } from './taste';
 
 /** Reflection questions that work for almost anything; three are offered per title. */
 export const QUESTIONS = [
@@ -26,11 +27,71 @@ export function questionsFor(id: string, n = 3): string[] {
 const makers = (t: Title) => t.people.filter((p) => p.role === 'director' || p.role === 'creator').map((p) => p.name).slice(0, 2).join(' and ');
 const what = (t: Title) => `${t.name}${t.year ? ` (${t.year})` : ''}${makers(t) ? `, ${t.kind === 'film' ? 'directed' : 'created'} by ${makers(t)}` : ''}`;
 
-export function reflectPrompt(t: Title): string {
+/** Theme words from a pasted line like "Themes: memory; grief" (the review prompt asks for one). */
+export const parseThemes = (s: string) => [
+  ...new Set(
+    s
+      .replace(/^\s*themes?\s*:/i, '')
+      .split(/[;,\n]/)
+      .map((x) => x.trim().toLowerCase().replace(/\.$/, ''))
+      .filter((x) => x && x.length <= 40),
+  ),
+];
+
+/** What you have said about it, as plain statements an assistant can work from. Nothing invented. */
+function yourView(t: Title, library: Title[], partner?: string): string[] {
+  const lines: string[] = [];
+  if (t.rating) lines.push(`My rating: ${t.rating}/10${t.partnerRating ? ` (${partner || 'my partner'}: ${t.partnerRating}/10)` : ''}.`);
+  if (t.expectation && beforeWatching(t)) {
+    const exp = (t.expectation - 1) * 25;
+    const got = t.rating ? (t.rating - 1) * (100 / 9) : undefined;
+    const verdict = got === undefined ? '' : got - exp >= 25 ? ' It turned out better than I expected.' : exp - got >= 25 ? ' It fell short of that.' : ' It was about what I expected.';
+    lines.push(`After the trailer I was "${EXPECTATIONS[t.expectation].toLowerCase()}".${verdict}`);
+  }
+  if (t.themes?.length) lines.push(`What it was about for me: ${t.themes.join(', ')}.`);
+  if (t.note?.trim()) lines.push(`My notes:\n"""\n${t.note.trim()}\n"""`);
+  const others = rated(library.filter((x) => x.id !== t.id));
+  if (others.length >= 5 && t.rating) lines.push(`For calibration: I rate things ${mean(others.map((x) => x.rating!)).toFixed(1)}/10 on average.`);
+  const makers = new Map(makerAffinity(others, 2).map((a) => [a.key, a]));
+  for (const p of t.people.filter((p) => p.role === 'director' || p.role === 'creator')) {
+    const a = makers.get(p.name);
+    if (a) lines.push(`I have rated ${a.n} other titles by ${p.name}, ${a.avg.toFixed(1)}/10 on average (${a.titles.slice(0, 3).join(', ')}).`);
+  }
+  const cs = criticScore(t);
+  if (cs?.kind === 'critics') lines.push(`Critics, for reference only: ${referenceText(cs)}.`);
+  return lines;
+}
+
+export interface ReviewOptions {
+  length: 'short' | 'full';
+  spoilers: boolean;
+}
+
+/**
+ * A prompt that turns a rating, a few theme words and rough notes into a review in your own voice.
+ * It forbids invented opinions and asks for inferences to be marked, so the draft stays yours.
+ */
+export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions, partner?: string): string {
+  const view = yourView(t, library, partner);
+  return [
+    `Write a review of ${what(t)} in my voice, as if I wrote it myself.`,
+    view.length ? view.join('\n') : 'I have not noted anything yet: ask me three short questions about my reaction before writing anything.',
+    [
+      'Rules:',
+      '- Use only the reactions above. Do not invent opinions, praise or criticism I did not give.',
+      '- Where you have to infer something to make it read well, put that part in [square brackets] so I can check it.',
+      `- ${o.spoilers ? 'Spoilers are fine.' : 'No spoilers beyond the basic setup.'}`,
+      `- ${o.length === 'short' ? 'Three to five sentences, first person, conversational, like a Letterboxd review. No headings.' : '300–450 words, first person, with a one-line verdict at the end. No headings.'}`,
+      '- Plain, specific language; no clichés like "a must-watch" or "a rollercoaster".',
+    ].join('\n'),
+    'After the review, add one last line suggesting up to three themes it was really about for me, exactly in the form: Themes: one; two; three',
+  ].join('\n\n');
+}
+
+export function reflectPrompt(t: Title, library: Title[] = [], partner?: string): string {
   return [
     `I just watched ${what(t)}.`,
-    t.rating ? `I'd rate it ${t.rating}/10.` : '',
-    t.note?.trim() ? `My first thoughts:\n"""\n${t.note.trim()}\n"""` : '',
+    ...yourView(t, library, partner),
     `Help me think about it more deeply: offer two or three distinct interpretations (including one I probably have not considered), the philosophical questions it raises, and where it sits among related works. Spoilers are fine. Challenge my reading where it seems thin. Keep it conversational and end with one question back to me.`,
   ].filter(Boolean).join('\n\n');
 }
@@ -44,3 +105,4 @@ export function recapPrompt(t: Title, last: Episode): string {
 }
 
 export const claudeUrl = (prompt: string) => `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
+export const chatgptUrl = (prompt: string) => `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;

@@ -10,6 +10,7 @@
   import TitlePage from './routes/TitlePage.svelte';
   import Taste from './routes/Taste.svelte';
   import Settings from './routes/Settings.svelte';
+  import Person from './routes/Person.svelte';
 
   const tabs = [
     { href: '#/', path: '/', label: 'Tonight', icon: 'M4 18h16M6 14l3-8 3 5 3-3 3 6' },
@@ -86,6 +87,10 @@
     <Taste />
   {:else if route.path === '/settings'}
     <Settings />
+  {:else if route.path === '/p'}
+    {#key route.params.toString()}
+      <Person qid={route.params.get('q') || undefined} name={route.params.get('name') ?? ''} />
+    {/key}
   {:else if route.path.startsWith('/t/')}
     {#key route.path}
       <TitlePage id={decodeURIComponent(route.path.slice(3))} />

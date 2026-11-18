@@ -13,6 +13,7 @@
   const kind = $derived(p.get('kind') ?? 'all');
   const genre = $derived(p.get('genre') ?? '');
   const person = $derived(p.get('person') ?? '');
+  const theme = $derived(p.get('theme') ?? '');
   const sort = $derived(p.get('sort') ?? 'recent');
   let q = $state('');
 
@@ -42,6 +43,7 @@
         (kind === 'all' || t.kind === kind) &&
         (!genre || t.genres.includes(genre)) &&
         (!person || t.people.some((x) => x.name === person)) &&
+        (!theme || !!t.themes?.includes(theme)) &&
         (!needle || fold(t.name).includes(needle) || t.people.some((x) => fold(x.name).includes(needle))),
     );
     const cmp: Record<string, (a: Title, b: Title) => number> = {
@@ -94,6 +96,9 @@
   </div>
   {#if person}
     <div class="row"><span class="chip on">{person}</span><button class="small ghost" onclick={() => setParam('person', '')}>Clear</button></div>
+  {/if}
+  {#if theme}
+    <div class="row"><span class="chip on">About {theme}</span><button class="small ghost" onclick={() => setParam('theme', '')}>Clear</button></div>
   {/if}
 </div>
 

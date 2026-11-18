@@ -87,3 +87,24 @@ describe('handoff', () => {
     expect(p).toMatch(/nothing about anything that happens after/);
   });
 });
+
+import { reviewPrompt, parseThemes } from '../../src/lib/handoff';
+describe('review prompt', () => {
+  it('uses only what you said, marks guesses, and closes the themes loop', () => {
+    const t = T({ name: 'Past Lives', year: 2023, rating: 9, partnerRating: 7, themes: ['memory', 'belonging'], note: 'the bar scene', expectation: 3, expectedAt: '2026-01-01', finishedAt: '2026-02-01' });
+    const p = reviewPrompt(t, [t], { length: 'short', spoilers: false }, 'Sara');
+    expect(p).toContain('My rating: 9/10 (Sara: 7/10)');
+    expect(p).toContain('memory, belonging');
+    expect(p).toContain('the bar scene');
+    expect(p).toMatch(/Do not invent opinions/);
+    expect(p).toMatch(/\[square brackets\]/);
+    expect(p).toMatch(/No spoilers/);
+    expect(p).toContain('better than I expected');
+    expect(p).toMatch(/Themes: one; two; three$/);
+    expect(reviewPrompt(T({ name: 'X' }), [], { length: 'full', spoilers: true })).toMatch(/ask me three short questions/);
+  });
+  it('reads a pasted "Themes:" line', () => {
+    expect(parseThemes('Themes: Memory; belonging; the road not taken.')).toEqual(['memory', 'belonging', 'the road not taken']);
+    expect(parseThemes('grief, grief')).toEqual(['grief']);
+  });
+});

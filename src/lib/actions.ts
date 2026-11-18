@@ -16,10 +16,10 @@ function newTitle(id: string, meta: Meta): Title {
   return { id, ...meta, status: 'want', followed: meta.kind === 'show' ? true : undefined, addedAt: t, updatedAt: t, enrichedAt: t };
 }
 
-export async function addFilm(qid: string, wiki?: string): Promise<string> {
+export async function addFilm(qid: string): Promise<string> {
   const id = `wd:${qid}`;
   if (await db.titles.get(id)) return id;
-  const meta = await filmMeta(qid, wiki);
+  const meta = await filmMeta(qid);
   await db.titles.add(newTitle(id, meta));
   persistStorage();
   return id;
@@ -98,7 +98,7 @@ export async function refreshTitle(t: Title, deep = false) {
     });
     await reconcile(t.id, false);
   } else if (t.qid) {
-    const meta = await filmMeta(t.qid, t.wiki);
+    const meta = await filmMeta(t.qid);
     const cur = await db.titles.get(t.id);
     if (cur) await db.titles.put({ ...cur, ...defined(meta), enrichedAt: now() });
   }
