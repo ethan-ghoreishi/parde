@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { route } from './lib/router.svelte';
-  import { ui, toast } from './lib/ui.svelte';
+  import { ui } from './lib/ui.svelte';
   import { syncShows } from './lib/actions';
   import Search from './components/Search.svelte';
   import Tonight from './routes/Tonight.svelte';
@@ -22,8 +22,7 @@
 
   async function sync() {
     try {
-      const r = await syncShows();
-      if (r.failed) toast(`Could not update ${r.failed} show${r.failed > 1 ? 's' : ''}. Will retry later.`, 'error');
+      await syncShows(); // background: failures are retried later; the Calendar's button reports them
     } catch {
       /* offline or TVmaze down: the calendar shows what we already have */
     }

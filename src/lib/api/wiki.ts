@@ -290,7 +290,8 @@ export async function filmsByPeople(people: { qid: string; name: string }[]): Pr
   for (const b of res.results.bindings) {
     const qid = b.film.value.split('/').pop()!;
     const personQid = b.person.value.split('/').pop()!;
-    if (out.has(qid)) continue;
+    // A film someone both wrote and directed is described as directed.
+    if (out.has(qid) && !(out.get(qid)!.role === 'wrote' && b.prop.value.endsWith('P57'))) continue;
     out.set(qid, {
       qid,
       name: b.filmLabel?.value ?? qid,

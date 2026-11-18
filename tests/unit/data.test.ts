@@ -113,3 +113,21 @@ describe('links', () => {
     await expect(moveDomain('old.to', 'not a domain')).rejects.toThrow();
   });
 });
+
+import { vi } from 'vitest';
+import { syncShows } from '../../src/lib/actions';
+describe('show sync', () => {
+  it('records a failed sync so tab focus does not refetch everything, and never throws', async () => {
+    await db.titles.add(T('tvm:1', { kind: 'show', tvmaze: 1, followed: true, status: 'watching' }));
+    const fetchMock = vi.fn(async () => new Response('down', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      expect(await syncShows()).toEqual({ refreshed: 0, failed: 1 });
+      const calls = fetchMock.mock.calls.length;
+      expect(await syncShows()).toEqual({ refreshed: 0, failed: 0 });
+      expect(fetchMock.mock.calls.length).toBe(calls);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

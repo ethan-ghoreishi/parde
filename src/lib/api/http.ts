@@ -1,16 +1,10 @@
 export class NetError extends Error {}
 
-const WIKIMEDIA = /(^|\.)(wikipedia|wikidata)\.org$/;
-
-/** JSON GET with a timeout. Wikimedia asks browser clients to identify themselves. */
+/** JSON GET with a timeout. No custom headers: they would add a CORS preflight to every request. */
 export async function getJson<T>(url: string, timeoutMs = 15000): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (WIKIMEDIA.test(new URL(url).hostname)) {
-    headers['Api-User-Agent'] = 'Parde/1 (personal film diary; https://github.com/ethan-ghoreishi/parde)';
-  }
   let res: Response;
   try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   } catch (e) {
     throw new NetError(navigator.onLine === false ? 'You are offline.' : `Could not reach ${new URL(url).hostname}.`, { cause: e });
   }

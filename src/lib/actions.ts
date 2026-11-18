@@ -134,7 +134,9 @@ async function runSync(force: boolean): Promise<{ refreshed: number; failed: num
     }
     await sleep(600);
   }
-  if (!failed) await setSetting('showsSyncedAt', now());
+  // Record the attempt even if some shows failed (offline, show removed upstream): otherwise every
+  // tab focus would refetch everything. Failures are retried within the hour.
+  await setSetting('showsSyncedAt', failed ? new Date(Date.now() - 5 * 3600e3).toISOString() : now());
   return { refreshed, failed };
 }
 
