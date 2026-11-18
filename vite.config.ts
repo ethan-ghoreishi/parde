@@ -19,6 +19,25 @@ export default defineConfig(({ command, mode, isPreview }) => ({
   },
   plugins: [
     svelte(),
+    {
+      // GitHub Pages cannot send headers; a meta CSP limits where the page can talk to.
+      name: 'csp',
+      apply: 'build',
+      transformIndexHtml: (html: string) =>
+        html.replace(
+          '<head>',
+          `<head>\n    <meta http-equiv="Content-Security-Policy" content="${[
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: https://*.wikimedia.org https://static.tvmaze.com",
+            "connect-src 'self' https://en.wikipedia.org https://www.wikidata.org https://query.wikidata.org https://api.tvmaze.com",
+            'frame-src https://www.youtube-nocookie.com',
+            "object-src 'none'",
+            "base-uri 'self'",
+          ].join('; ')}" />`,
+        ),
+    },
     ...(mode === 'test'
       ? []
       : [
@@ -41,7 +60,7 @@ export default defineConfig(({ command, mode, isPreview }) => ({
               runtimeCaching: [
                 {
                   // Posters: cache-first so the library looks right offline.
-                  urlPattern: /^https:\/\/(upload\.wikimedia\.org|static\.tvmaze\.com)\/.*/i,
+                  urlPattern: /^https:\/\/([a-z]+\.wikimedia\.org|static\.tvmaze\.com)\/.*/i,
                   handler: 'CacheFirst',
                   options: {
                     cacheName: 'posters',

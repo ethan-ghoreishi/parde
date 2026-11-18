@@ -57,7 +57,16 @@
     clearTimeout(noteTimer);
     if (t && note !== undefined && note !== (t.note ?? '')) update(t.id, { note });
   }
-  $effect(() => () => saveNote());
+  $effect(() => {
+    const flush = () => document.visibilityState === 'hidden' && saveNote();
+    document.addEventListener('visibilitychange', flush);
+    addEventListener('pagehide', saveNote);
+    return () => {
+      document.removeEventListener('visibilitychange', flush);
+      removeEventListener('pagehide', saveNote);
+      saveNote();
+    };
+  });
 
   const statuses = $derived<[Status, string][]>(
     t?.kind === 'film'

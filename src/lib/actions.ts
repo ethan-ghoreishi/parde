@@ -106,7 +106,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Bring followed shows up to date. TVmaze's update index tells us which changed, so a normal
  * day costs one request. Throttled well under TVmaze's 20 requests per 10 seconds.
  */
-export async function syncShows(force = false): Promise<{ refreshed: number; failed: number }> {
+let syncing: Promise<{ refreshed: number; failed: number }> | null = null;
+
+export function syncShows(force = false) {
+  // App start and tab-focus can both trigger this: never run two at once.
+  syncing ??= runSync(force).finally(() => (syncing = null));
+  return syncing;
+}
+
+async function runSync(force: boolean): Promise<{ refreshed: number; failed: number }> {
   const last = await getSetting<string>('showsSyncedAt', '');
   const age = last ? Date.now() - Date.parse(last) : Infinity;
   if (!force && age < 6 * 3600e3) return { refreshed: 0, failed: 0 };

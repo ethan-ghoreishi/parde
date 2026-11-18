@@ -9,6 +9,7 @@
   import { filmsByPeople, wikiSummary, type Suggestion } from '../lib/api/wiki';
   import { addFilm } from '../lib/actions';
   import { toast, errorText } from '../lib/ui.svelte';
+  import { formatDay } from '../lib/format';
   import { getSetting } from '../lib/db';
   import Poster from '../components/Poster.svelte';
 
@@ -34,6 +35,7 @@
   const countries = $derived(counts(watched.flatMap((t) => t.countries), 8));
   const subjects = $derived(counts(r.filter((t) => t.rating! >= 8).flatMap((t) => t.subjects), 10).filter(([, n]) => n >= 2));
   const avg = $derived(mean(r.map((t) => t.rating!)));
+  const diary = $derived(watched.filter((t) => t.finishedAt).sort((a, b) => b.finishedAt!.localeCompare(a.finishedAt!)).slice(0, 12));
   const thisYear = $derived(watched.filter((t) => t.finishedAt?.startsWith(String(new Date().getFullYear()))).length);
 
   const pct = (n: number) => `${Math.round(n)}`;
@@ -211,6 +213,17 @@
     {/if}
   </div>
 
+  {#if diary.length}
+    <section class="section">
+      <h2>Recently finished</h2>
+      <ul class="diary small">
+        {#each diary as t (t.id)}
+          <li><span class="muted">{formatDay(t.finishedAt!.slice(0, 10))}</span> <a href={titleHref(t.id)}>{t.name}</a> {#if t.rating}<span class="chip">{t.rating}/10</span>{/if}</li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
   <section class="section">
     <div class="spread">
       <h2>More from people you trust</h2>
@@ -256,6 +269,10 @@
   .bars { display: flex; gap: 0.4rem; align-items: flex-end; height: 120px; }
   .bar { flex: 1; display: grid; grid-template-rows: 1fr auto; justify-items: center; height: 100%; align-items: end; }
   .fill { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 3px; }
+  .diary { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.35rem; }
+  .diary li { display: flex; gap: 0.6rem; align-items: center; }
+  .diary .muted { min-width: 6.5rem; }
+  .diary a { color: var(--text); }
   .sugg { list-style: none; padding: 0; margin: 0.75rem 0 0; }
   .sugg .name { font-weight: 600; font-size: 0.92rem; }
 </style>
