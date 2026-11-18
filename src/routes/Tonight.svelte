@@ -28,7 +28,11 @@
 
   const byTitle = $derived.by(() => {
     const m = new Map<string, Episode[]>();
-    for (const e of data.value.episodes) m.set(e.titleId, [...(m.get(e.titleId) ?? []), e]);
+    for (const e of data.value.episodes) {
+      const list = m.get(e.titleId);
+      if (list) list.push(e);
+      else m.set(e.titleId, [e]);
+    }
     return m;
   });
 

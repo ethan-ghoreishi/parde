@@ -2,13 +2,13 @@
   import { ui, toast, errorText } from '../lib/ui.svelte';
   import { searchFilms, wikiSummary, type FilmHit } from '../lib/api/wiki';
   import { searchShows, type ShowHit } from '../lib/api/tvmaze';
-  import { addFilm, addShow, update, seenUpTo } from '../lib/actions';
+  import { addFilm, addShow, update, setExpectation, seenAllAired } from '../lib/actions';
   import { db, type Status } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { titleHref, go } from '../lib/router.svelte';
-  import { isAired, byOrder } from '../lib/schedule';
   import Poster from './Poster.svelte';
   import Scale from './Scale.svelte';
+  import ProgressPicker from './ProgressPicker.svelte';
   import { EXPECTATIONS } from '../lib/taste';
 
   let dialog: HTMLDialogElement;
@@ -80,8 +80,8 @@
       const id = kind === 'film' ? await addFilm(key as string, films.find((f) => f.qid === key)?.wiki) : await addShow(key as number);
       if (status !== 'want') {
         if (kind === 'show' && status === 'watched') {
-          const eps = (await db.episodes.where('titleId').equals(id).toArray()).filter((e) => isAired(e)).sort(byOrder);
-          if (eps.length) await seenUpTo(eps.at(-1)!);
+          // "Seen all" of a running show means caught up: it stays in progress for the next season.
+          await seenAllAired(id);
           const t = await db.titles.get(id);
           if (t?.status !== 'watched') await update(id, { status: t?.showStatus === 'Ended' ? 'watched' : 'watching' });
         } else {
@@ -128,8 +128,12 @@
             {#if added[id] === 'want' && own}
               <div class="follow">
                 <span class="small muted">After the trailer, how keen are you?</span>
-                <Scale max={5} value={own.expectation} labels={EXPECTATIONS} onpick={(v) => update(id, { expectation: v })} compact />
+                <Scale max={5} value={own.expectation} labels={EXPECTATIONS} onpick={(v) => setExpectation(id, v)} compact />
                 <a class="small" href={own.trailer ? `https://www.youtube.com/watch?v=${own.trailer}` : trailerSearch(name, year)} target="_blank" rel="noopener noreferrer">Watch trailer ↗</a>
+              </div>
+            {:else if added[id] === 'watching' && own?.kind === 'show'}
+              <div class="follow">
+                <ProgressPicker titleId={id} label="Where are you up to?" />
               </div>
             {:else if added[id] === 'watched' && own}
               <div class="follow">

@@ -1,8 +1,8 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, type Episode, type Title } from '../../src/lib/db';
-import { buildBackup, parseBackup, restore } from '../../src/lib/backup';
-import { setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus } from '../../src/lib/actions';
+import { buildBackup, parseBackup, restore, undoRestore } from '../../src/lib/backup';
+import { setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, refreshTitle, seenAllAired } from '../../src/lib/actions';
 
 const T = (id: string, o: Partial<Title> = {}): Title => ({
   id, kind: 'film', name: id, genres: [], people: [], subjects: [], countries: [], languages: [], critics: [],
@@ -69,6 +69,92 @@ describe('backup', () => {
   });
 });
 
+describe('backup integrity', () => {
+  const file = (data: Record<string, unknown[]>) => JSON.stringify({ app: 'parde', schemaVersion: 1, exportedAt: '', data });
+  it('rejects records that point at a title missing from the file, and malformed themes', () => {
+    const orphan = parseBackup(file({ titles: [T('wd:Q1')], seen: [{ episodeId: 1, titleId: 'tvm:9', seenAt: 'x' }] }));
+    expect(orphan.ok).toBe(false);
+    expect(parseBackup(file({ titles: [T('wd:Q1', { themes: ['memory', 3 as unknown as string] })] })).ok).toBe(false);
+    expect(parseBackup(file({ titles: [T('wd:Q1', { themes: ['memory'] })] })).ok).toBe(true);
+  });
+  it('a replace can be undone, and the undo copy never ends up inside backups', async () => {
+    await db.titles.add(T('wd:Q1', { rating: 8 }));
+    const p = parseBackup(file({ titles: [T('wd:Q2')] }));
+    if (!p.ok) throw new Error(p.error);
+    await restore(p.backup, 'replace');
+    expect(await db.titles.get('wd:Q1')).toBeUndefined();
+    expect((await buildBackup()).data.settings).toEqual([]);
+    expect(await undoRestore()).toBe(true);
+    expect((await db.titles.get('wd:Q1'))?.rating).toBe(8);
+    expect(await db.titles.get('wd:Q2')).toBeUndefined();
+    expect(await undoRestore()).toBe(false); // one step only
+  });
+});
+
+describe('series progress', () => {
+  const FUTURE = '2999-01-01';
+  beforeEach(async () => {
+    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Running', followed: true }));
+    await db.episodes.bulkAdd([E(1, 1), E(2, 2), E(3, 1, { season: 2 }), E(4, 2, { season: 2, airdate: FUTURE })]);
+  });
+  const status = async () => (await db.titles.get('tvm:1'))?.status;
+  const seenIds = async () => (await db.seen.toCollection().primaryKeys()).sort();
+
+  it('bulk marks never touch episodes that are not out yet', async () => {
+    await setSeasonSeen('tvm:1', 2, true);
+    expect(await seenIds()).toEqual([3]);
+    await seenAllAired('tvm:1');
+    expect(await seenIds()).toEqual([1, 2, 3]);
+    expect(await status()).toBe('watching'); // caught up on a running show
+  });
+  it('"Finished" marks what is out, and a new episode airing reopens the show', async () => {
+    await setStatus((await db.titles.get('tvm:1'))!, 'watched');
+    expect(await seenIds()).toEqual([1, 2, 3]);
+    await reconcile('tvm:1', false);
+    expect(await status()).toBe('watched');
+    await db.episodes.update(4, { airdate: '2020-02-01' }); // the next episode is now out
+    await reconcile('tvm:1', false);
+    expect(await status()).toBe('watching');
+  });
+  it('a background refresh never un-pauses a show; marking an episode does', async () => {
+    await setSeen(E(1, 1), true);
+    await db.titles.update('tvm:1', { status: 'paused' });
+    await reconcile('tvm:1', false);
+    expect(await status()).toBe('paused');
+    await setSeen(E(2, 2), true);
+    expect(await status()).toBe('watching');
+  });
+  it('"up to here" sets the exact position, and can be undone', async () => {
+    await setSeen(E(3, 1, { season: 2 }), true);
+    const undo = await setProgress('tvm:1', E(2, 2));
+    expect(await seenIds()).toEqual([1, 2]);
+    expect(await status()).toBe('watching');
+    await undo();
+    expect(await seenIds()).toEqual([3]);
+    await setProgress('tvm:1', null);
+    expect(await seenIds()).toEqual([]);
+    expect(await status()).toBe('watching'); // "we are starting it" stays in progress
+  });
+});
+
+describe('episode refresh', () => {
+  it('carries a seen mark across when TVmaze re-creates an episode under a new id', async () => {
+    await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
+    await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
+    await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
+    const ep = (id: number, number: number) => ({ id, name: `E${number}`, season: 1, number, airdate: '2020-01-01', airtime: '', airstamp: null, runtime: 30, summary: null });
+    const show = { id: 7, name: 'Show', genres: [], status: 'Running', premiered: '2020-01-01', averageRuntime: 30, runtime: 30, rating: { average: null }, network: null, webChannel: null, externals: { imdb: null }, image: null, summary: null, updated: 2, _embedded: { episodes: [ep(80, 1), ep(71, 2)] } };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(show))));
+    try {
+      await refreshTitle((await db.titles.get('tvm:7'))!);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(await db.episodes.get(70)).toBeUndefined();
+    expect(await db.seen.get(80)).toMatchObject({ titleId: 'tvm:7' });
+  });
+});
+
 describe('episodes', () => {
   beforeEach(async () => {
     await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', followed: true }));
@@ -114,7 +200,6 @@ describe('links', () => {
   });
 });
 
-import { vi } from 'vitest';
 import { syncShows } from '../../src/lib/actions';
 describe('show sync', () => {
   it('records a failed sync so tab focus does not refetch everything, and never throws', async () => {

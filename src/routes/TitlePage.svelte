@@ -1,11 +1,11 @@
 <script lang="ts">
   import { db, getSetting, type Status, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { update, setStatus, refreshTitle, removeTitle, setSeen, deleteWatch } from '../lib/actions';
+  import { update, setStatus, setExpectation, refreshTitle, removeTitle, setSeen, deleteWatch } from '../lib/actions';
   import { progress, code, release, isAired, localDay, byOrder } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
-  import { EXPECTATIONS, criticScore } from '../lib/taste';
+  import { EXPECTATIONS, criticScore, referenceText } from '../lib/taste';
   import { questionsFor, reflectPrompt, recapPrompt, claudeUrl } from '../lib/handoff';
   import { toast, errorText, copy } from '../lib/ui.svelte';
   import { go } from '../lib/router.svelte';
@@ -16,6 +16,7 @@
   import Sources from '../components/Sources.svelte';
   import Episodes from '../components/Episodes.svelte';
   import LogWatch from '../components/LogWatch.svelte';
+  import ProgressPicker from '../components/ProgressPicker.svelte';
 
   let { id }: { id: string } = $props();
 
@@ -41,6 +42,10 @@
       .map(([name, roles]) => ({ name, role: roles.join(', ') })),
   );
   const cast = $derived(t?.people.filter((p) => p.role === 'cast') ?? []);
+  // Once you have watched it, "how keen were you?" would be hindsight: keep it as it was.
+  const expectationLocked = $derived(!!t && (t.status === 'watched' || t.rating !== undefined));
+  const provenance = (c: { source: string; asOf?: string }) =>
+    `${c.source}${c.source === 'TVmaze' ? ' users' : ', via Wikidata'}${c.asOf ? `, as of ${c.asOf}` : ''}. Scores can be out of date.`;
 
   let logOpen = $state(false);
   let note = $state<string | undefined>(undefined);
@@ -127,7 +132,7 @@
 
         {#if t.critics.length}
           <div class="row critics" aria-label="Scores">
-            {#each t.critics as c}<span class="chip" title={c.source}><strong>{c.value}</strong> {c.source}</span>{/each}
+            {#each t.critics as c}<span class="chip" title={provenance(c)}><strong>{c.value}</strong> {c.source}{c.asOf ? ` · ${c.asOf.slice(0, 4)}` : ''}</span>{/each}
           </div>
         {/if}
 
@@ -152,9 +157,11 @@
               <button onclick={() => setSeen(next, true)} disabled={!isAired(next)}>Mark {code(next)} seen</button>
             </div>
             {#if !best}<p class="small muted">No source yet: open the episode below to add one, or save a whole-series pattern.</p>{/if}
+            <ProgressPicker titleId={t.id} label={prog.seenCount ? 'Seen up to' : 'Seen some already? Up to'} />
           {:else if t.kind === 'show' && epsQ.value.length}
             <p>You are all caught up.{t.showStatus === 'Ended' ? '' : ' New episodes will appear on your calendar.'}</p>
             {#if t.status !== 'watched'}<button onclick={() => (logOpen = true)}>Log as finished</button>{/if}
+            <ProgressPicker titleId={t.id} />
           {:else if t.kind === 'film'}
             <div class="row">
               {#if best}<button class="primary" onclick={openBest}>Watch on {best.link.label || hostOf(best.url)} ↗</button>{/if}
@@ -183,11 +190,15 @@
 
     <div class="cols">
       <div class="main-col">
-        {#if t.status !== 'watched' || t.expectation}
+        {#if expectationLocked}
+          {#if t.expectation}
+            <p class="small muted">Before watching you were <strong>{EXPECTATIONS[t.expectation].toLowerCase()}</strong> after the trailer.</p>
+          {/if}
+        {:else}
           <section class="section">
             <h2>After the trailer</h2>
             <p class="small muted">How keen are you? Parde later compares this with how much you actually enjoyed it.</p>
-            <Scale max={5} value={t.expectation} labels={EXPECTATIONS} onpick={(v) => update(t.id, { expectation: v })} name="Expectation" />
+            <Scale max={5} value={t.expectation} labels={EXPECTATIONS} onpick={(v) => setExpectation(t.id, v)} name="Expectation" />
             <div class="row" style="margin-top: 0.75rem">
               {#if t.trailer}
                 {#if showTrailer}
@@ -212,7 +223,7 @@
               <Scale max={10} value={t.partnerRating} onpick={(v) => update(t.id, { partnerRating: v })} name="Partner rating" />
             {/if}
             {#if t.rating && cs}
-              <p class="small muted" style="margin-top: 0.5rem">{cs.kind === 'critics' ? 'Critics' : 'Audiences'}: {cs.score}/100 · you: {t.rating * 10}/100{Math.abs(t.rating * 10 - cs.score) >= 20 ? ` — you ${t.rating * 10 > cs.score ? 'liked it more' : 'liked it less'} than most` : ''}</p>
+              <p class="small muted" style="margin-top: 0.5rem">{referenceText(cs)} · you {t.rating}/10{cs.source !== 'Rotten Tomatoes' && Math.abs(t.rating * 10 - cs.score) >= 20 ? ` — you liked it ${t.rating * 10 > cs.score ? 'more' : 'less'} than ${cs.kind === 'critics' ? 'critics' : 'most viewers'}` : ''}</p>
             {/if}
           </section>
         {/if}

@@ -13,8 +13,8 @@ export interface TvmShow {
   averageRuntime: number | null;
   runtime: number | null;
   rating: { average: number | null };
-  network: { name: string } | null;
-  webChannel: { name: string } | null;
+  network: { name: string; country?: { code: string } | null } | null;
+  webChannel: { name: string; country?: { code: string } | null } | null;
   externals: { imdb: string | null };
   image: { medium: string; original: string } | null;
   summary: string | null;
@@ -100,6 +100,8 @@ export function showToMeta(s: TvmShow): Meta {
     imdb: s.externals?.imdb ?? undefined,
     network: s.network?.name,
     webChannel: s.webChannel?.name,
+    // The channel whose dates we show (see schedule.release): a network, else the streaming service.
+    channelCountry: (s.network ?? s.webChannel)?.country?.code ?? undefined,
     showStatus: s.status,
     tvmUpdated: s.updated,
   };

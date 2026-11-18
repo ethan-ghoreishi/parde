@@ -6,7 +6,7 @@
   import { db, now } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { getSetting } from '../lib/db';
-  import { DEFAULT_SITES, siteUrl, type Site } from '../lib/sites';
+  import { DEFAULT_SITES, siteUrl, validSite, type Site } from '../lib/sites';
 
   let {
     title,
@@ -145,7 +145,7 @@
 
   <div class="find row small">
     <span class="muted">Find on</span>
-    {#each sites.value as s}
+    {#each sites.value.filter(validSite) as s}
       <a href={siteUrl(s, findQuery)} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">{s.name} ↗</a>
     {/each}
     <a href="#/settings" class="muted">edit sites</a>

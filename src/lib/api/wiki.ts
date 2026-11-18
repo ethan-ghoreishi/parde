@@ -6,7 +6,7 @@ export type Meta = Pick<
   Title,
   | 'kind' | 'name' | 'year' | 'poster' | 'overview' | 'genres' | 'runtime' | 'people' | 'subjects'
   | 'countries' | 'languages' | 'critics' | 'trailer' | 'qid' | 'imdb' | 'tvmaze' | 'wiki'
-  | 'network' | 'webChannel' | 'showStatus' | 'tvmUpdated'
+  | 'network' | 'webChannel' | 'channelCountry' | 'showStatus' | 'tvmUpdated'
 >;
 
 export interface FilmHit {
@@ -113,11 +113,14 @@ export function parseCritics(claims: Claims): CriticScore[] {
     if (!def || !value) continue;
     const method = itemId(cl.qualifiers?.P459?.[0]);
     if (def.methods && method && !def.methods.includes(method)) continue;
+    // A series' score for one season (P4908) says nothing certain about the whole show.
+    if (cl.qualifiers?.P4908) continue;
     const score = normaliseScore(value);
     if (score === undefined || score > 100) continue;
     const at = ((cl.qualifiers?.P585?.[0]?.datavalue?.value as { time?: string })?.time ?? '').replace(/^\+/, '');
+    const asOf = /^\d{4}-\d{2}/.test(at) && !at.startsWith('0000') ? at.slice(0, at.slice(5, 7) === '00' ? 4 : 7) : undefined;
     const prev = best.get(def.source);
-    if (!prev || at > prev.at) best.set(def.source, { c: { source: def.source, value, score }, at });
+    if (!prev || at > prev.at) best.set(def.source, { c: { source: def.source, value, score, ...(asOf ? { asOf } : {}) }, at });
   }
   return [...best.values()].map((b) => b.c);
 }
