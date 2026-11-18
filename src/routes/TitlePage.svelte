@@ -359,7 +359,7 @@
   .hero { display: flex; gap: 1.5rem; align-items: flex-start; }
   .head { flex: 1; min-width: 0; }
   .critics .chip strong { font-variant-numeric: tabular-nums; }
-  .next { display: grid; gap: 0.5rem; }
+  .next { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
   .next-ep { font-size: 1.1rem; }
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 2rem; }
   .questions { margin: 0.75rem 0; padding-left: 1.2rem; }
@@ -378,6 +378,7 @@
   }
   @media (max-width: 560px) {
     .hero { flex-direction: column; align-items: center; text-align: center; }
+    .head { align-self: stretch; }
     .hero :global(.row) { justify-content: center; }
     .next { text-align: left; }
   }

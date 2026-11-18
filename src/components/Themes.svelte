@@ -22,7 +22,7 @@
   const suggestions = $derived(
     [...new Set([...title.subjects.map((s) => s.toLowerCase()).filter((s) => s.length <= 30).slice(0, 5), ...used.value, ...STARTERS])]
       .filter((x) => !chosen.includes(x))
-      .slice(0, compact ? 10 : 18),
+      .slice(0, compact ? 8 : 12),
   );
   let custom = $state('');
 

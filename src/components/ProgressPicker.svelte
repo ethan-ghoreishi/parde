@@ -65,5 +65,5 @@
 <style>
   .picker { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
   label { margin: 0; color: var(--muted); font-size: 0.85rem; }
-  select { width: auto; max-width: 100%; min-height: 36px; padding: 0.25rem 0.5rem; flex: 1 1 12rem; }
+  select { width: auto; min-width: 0; max-width: 100%; min-height: 36px; padding: 0.25rem 0.5rem; flex: 1 1 12rem; text-overflow: ellipsis; }
 </style>
