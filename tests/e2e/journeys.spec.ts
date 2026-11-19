@@ -266,7 +266,10 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
 
 test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the bottom edge and never covers the end of a page', async ({ page, isMobile }) => {
   await search(page, 'severance');
-  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
+  const hit = page.locator('li.hit', { hasText: 'Severance' });
+  await hit.getByRole('button', { name: 'Watching' }).click();
+  // Navigating away while the series is still being saved would abort the save.
+  await expect(hit.getByText('Where are you up to?')).toBeVisible();
   await page.keyboard.press('Escape');
   // Short pages (an empty calendar day) and long ones (a series with its episode list)
   for (const p of ['./', './#/calendar?d=2001-01-01', './#/library', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
