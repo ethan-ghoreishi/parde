@@ -77,7 +77,6 @@
   </div>
 </header>
 
-<div class="scroller" id="scroller">
 <main id="main" tabindex="-1">
   {#if route.path === '/'}
     <Tonight />
@@ -103,7 +102,6 @@
     <div class="empty">That page does not exist. <a href="#/">Go to Tonight</a></div>
   {/if}
 </main>
-</div>
 
 <nav class="bottom" aria-label="Main">
   {#each tabs as t}
@@ -130,32 +128,32 @@
   .skip { position: absolute; left: -9999px; }
   .skip:focus { left: 1rem; top: 1rem; z-index: 50; background: var(--surface); padding: 0.5rem 1rem; border-radius: 8px; }
   header {
-    flex: none; z-index: 20;
+    position: sticky; top: 0; z-index: 20;
     background: var(--bg);
     border-bottom: 1px solid var(--line);
     padding-top: env(safe-area-inset-top);
     padding-left: env(safe-area-inset-left);
     padding-right: env(safe-area-inset-right);
   }
-  /* The only scrolling region. */
-  /* position: relative keeps absolutely positioned descendants (sr-only labels) inside it, not the page. */
-  .scroller { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
   .inner { max-width: 1120px; margin: 0 auto; padding: 0.6rem 1rem; display: flex; align-items: center; gap: 1.5rem; }
   .brand { display: flex; align-items: center; gap: 0.5rem; text-decoration: none; color: var(--text); font-family: var(--serif); font-size: 1.35rem; font-weight: 600; }
   .top { display: flex; gap: 0.25rem; flex: 1; }
   .top a { color: var(--muted); text-decoration: none; padding: 0.4rem 0.8rem; border-radius: 999px; }
   .top a[aria-current='page'] { color: var(--text); background: var(--surface-2); }
   .actions { margin-left: auto; }
+  /* position: relative keeps absolutely positioned descendants (sr-only labels) from widening the page. */
   main {
-    max-width: 1120px; margin: 0 auto; outline: none;
-    padding: 1.25rem calc(1rem + env(safe-area-inset-right)) 2rem calc(1rem + env(safe-area-inset-left));
+    position: relative; max-width: 1120px; margin: 0 auto; outline: none;
+    padding: 1.25rem calc(1rem + env(safe-area-inset-right)) 3rem calc(1rem + env(safe-area-inset-left));
   }
   .bottom { display: none; }
   @media (max-width: 720px) {
     .top { display: none; }
-    /* In the page's flow, under the scrolling area: not position: fixed, so nothing can shift it. */
+    /* Room for the tab bar, so the end of every page can be scrolled clear of it. */
+    main { padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 2rem); }
     .bottom {
-      flex: none; display: grid; grid-template-columns: repeat(4, 1fr);
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+      display: grid; grid-template-columns: repeat(4, 1fr);
       background: var(--surface); border-top: 1px solid var(--line);
       padding-bottom: env(safe-area-inset-bottom);
       padding-left: env(safe-area-inset-left);
