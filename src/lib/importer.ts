@@ -15,6 +15,8 @@ export interface Row {
   kind?: Kind;
   /** 1–10 */
   rating?: number;
+  /** A rating written as a bare number ("Heat 4"), whose scale (5 or 10) the list as a whole decides */
+  bare?: number;
   /** YYYY-MM-DD */
   date?: string;
   status: 'watched' | 'want';
@@ -48,7 +50,7 @@ export function parseCsv(text: string): string[][] {
 }
 
 const SHOW_TYPES = /^(tv ?(mini ?)?series|tvseries|tvminiseries)$/i;
-const SKIP_TYPES = /^(tv ?episode|tvepisode|video ?game|videogame|podcast ?(series|episode))$/i;
+const SKIP_TYPES = /^(tv ?episode|tvepisode|video ?game|videogame|podcast ?(series|episode)|music ?video|musicvideo)$/i;
 const year = (s?: string) => (s && /^(18|19|20)\d{2}$/.test(s.trim()) ? Number(s.trim()) : undefined);
 const day = (s?: string) => s?.trim().match(/^\d{4}-\d{2}-\d{2}/)?.[0];
 const within = (n: number) => (Number.isFinite(n) && n >= 1 && n <= 10 ? Math.round(n) : undefined);
@@ -60,6 +62,8 @@ function fromCsv(table: string[][], status: Row['status']): Row[] | null {
   const nameCol = col('name', 'title', 'primarytitle', 'film', 'movie');
   if (nameCol < 0) return null;
   const letterboxd = head.includes('letterboxd uri');
+  // IMDb exports have a Const column: always out of 10, even if every rating happens to be 5 or less.
+  const imdbExport = head.includes('const') && head.includes('your rating');
   const c = {
     year: col('year', 'startyear', 'release year'),
     imdb: col('const', 'tconst', 'imdb id', 'imdb_id', 'imdbid'),
@@ -67,15 +71,14 @@ function fromCsv(table: string[][], status: Row['status']): Row[] | null {
     rating: col('your rating', 'rating', 'my rating'),
     date: col('watched date', 'date rated', 'date', 'watched'),
   };
-  const ratings = c.rating >= 0 ? table.slice(1).map((r) => Number(r[c.rating])).filter((n) => n > 0) : [];
-  // Letterboxd rates out of 5 in halves; a generic CSV whose ratings never exceed 5 is treated the same.
-  const halves = letterboxd || (ratings.length > 0 && ratings.every((n) => n <= 5));
   return table.slice(1).flatMap((r, i) => {
     const name = r[nameCol]?.trim();
     const type = c.type >= 0 ? r[c.type]?.trim() ?? '' : '';
     if (!name || SKIP_TYPES.test(type)) return [];
-    const raw = Number(r[c.rating]);
-    const rating = c.rating >= 0 && raw > 0 ? within(halves ? raw * 2 : raw) : undefined;
+    const raw = c.rating >= 0 && r[c.rating]?.trim() ? Number(r[c.rating]) : NaN;
+    // Letterboxd rates out of 5 in halves; any other CSV leaves the scale to the list as a whole.
+    const rating = raw > 0 ? within(letterboxd ? raw * 2 : raw) : undefined;
+    const bare = rating && !letterboxd && !imdbExport ? raw : undefined;
     const imdb = c.imdb >= 0 ? r[c.imdb]?.match(/tt\d{6,}/)?.[0] : undefined;
     return [{
       line: i + 2,
@@ -85,6 +88,7 @@ function fromCsv(table: string[][], status: Row['status']): Row[] | null {
       imdb,
       kind: letterboxd ? 'film' : SHOW_TYPES.test(type) ? 'show' : type ? 'film' : undefined,
       rating,
+      ...(bare ? { bare } : {}),
       date: day(r[c.date]),
       status: rating ? 'watched' : status,
     } satisfies Row];
@@ -104,9 +108,12 @@ export function parseLine(text: string, line: number, status: Row['status']): Ro
   if (/[([]\s*film\s*[)\]]/i.test(s)) (row.kind = 'film'), (s = s.replace(/[([]\s*film\s*[)\]]/i, ' '));
   const stars = s.match(/(★+)(½)?/);
   if (stars) (row.rating = within(stars[1].length * 2 + (stars[2] ? 1 : 0))), (s = s.replace(stars[0], ' '));
-  const score = s.match(/[\s,;|:–-]+(\d{1,2}(?:\.\d)?)\s*(?:\/\s*10)?\s*$/);
-  if (!row.rating && score && !/^(18|19|20)\d{2}$/.test(score[1]) && within(Number(score[1]))) {
-    row.rating = within(Number(score[1]));
+  // "8/10", "4.5/5", or a bare number whose scale the whole list decides (see parseImport)
+  const score = s.match(/[\s,;|:–-]+(\d{1,2}(?:\.\d)?)\s*(?:\/\s*(10|5)\b)?\s*$/);
+  if (!row.rating && score && !/^(18|19|20)\d{2}$/.test(score[1]) && within(Number(score[1]) * (score[2] === '5' ? 2 : 1))) {
+    const n = Number(score[1]);
+    row.rating = within(score[2] === '5' ? n * 2 : n);
+    if (!score[2]) row.bare = n;
     s = s.slice(0, score.index);
   }
   const y = splitYear(s.replace(/[\s,;|:–-]+$/, ''));
@@ -117,14 +124,26 @@ export function parseLine(text: string, line: number, status: Row['status']): Ro
   return row.name || row.imdb ? row : null;
 }
 
-export function parseImport(text: string, status: Row['status'] = 'watched'): Row[] {
-  const clean = text.replace(/^﻿/, '');
+/**
+ * Bare-number ratings ("Heat 4"): any above 5 means the list is out of 10; if none are, they could be
+ * stars or a harsh 10-point scale, which only the person can say (see `scaleOf`). Default: out of 5.
+ */
+export function parseImport(text: string, status: Row['status'] = 'watched', outOf?: 5 | 10): Row[] {
+  const clean = text.replace(/^\uFEFF/, '');
   const first = clean.split(/\r?\n/, 1)[0] ?? '';
-  if (first.includes(',') && /(^|,)"?(name|title|const|tconst|letterboxd uri)"?(,|$)/i.test(first)) {
-    const rows = fromCsv(parseCsv(clean), status);
-    if (rows) return rows;
-  }
-  return clean.split(/\r?\n/).flatMap((l, i) => parseLine(l, i + 1, status) ?? []);
+  let rows: Row[] | null = null;
+  if (first.includes(',') && /(^|,)"?(name|title|const|tconst|letterboxd uri)"?(,|$)/i.test(first)) rows = fromCsv(parseCsv(clean), status);
+  rows ??= clean.split(/\r?\n/).flatMap((l, i) => parseLine(l, i + 1, status) ?? []);
+  const scale = outOf ?? scaleOf(rows).outOf;
+  for (const r of rows) if (r.bare !== undefined) r.rating = within(scale === 5 ? r.bare * 2 : r.bare);
+  return rows;
+}
+
+/** Whether the bare-number ratings in a list are out of 5 or 10, and whether that is a guess. */
+export function scaleOf(rows: Row[]): { outOf: 5 | 10; ambiguous: boolean } {
+  const bare = rows.flatMap((r) => (r.bare !== undefined ? [r.bare] : []));
+  if (!bare.length || bare.some((n) => n > 5)) return { outOf: 10, ambiguous: false };
+  return { outOf: 5, ambiguous: true };
 }
 
 // ---------- Matching ----------
@@ -137,6 +156,8 @@ export interface Match {
   name: string;
   year?: number;
   note?: string;
+  /** Already in the library: the existing title id */
+  owned?: string;
 }
 
 export interface Item {
@@ -146,9 +167,14 @@ export interface Item {
   pick: number;
   /** Confident enough to add without asking */
   sure: boolean;
-  /** Already in the library: the existing title id */
-  owned?: string;
 }
+
+/** The title already in the library that a match refers to, if any. */
+export function ownedId(m: Pick<Match, 'kind' | 'qid' | 'tvmaze'>, library: Title[]): string | undefined {
+  return library.find((t) => (m.qid && (t.id === `wd:${m.qid}` || t.qid === m.qid)) || (m.tvmaze && t.tvmaze === m.tvmaze))?.id;
+}
+
+export const ownedOf = (it: Item) => it.candidates[it.pick]?.owned;
 
 const FILM_T = ['Q11424', 'Q24869', 'Q202866', 'Q29168811', 'Q93204', 'Q506240', 'Q226730'];
 const SHOW_T = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
@@ -222,13 +248,15 @@ export async function byLabel(names: string[]) {
 /** The one candidate we would pick, and whether it is safe to pick it without asking. */
 export function choose(row: Row, cands: (Match & { links?: number })[]): { candidates: Match[]; pick: number; sure: boolean } {
   let list = row.kind ? cands.filter((c) => c.kind === row.kind) : cands;
-  if (!list.length) list = cands;
+  // Asked for a series and found only films (or the reverse): offer them, never add one unasked.
+  const wrongKind = !list.length;
+  if (wrongKind) list = cands;
   if (!list.length) return { candidates: [], pick: -1, sure: false };
   const exactYear = row.year ? list.filter((c) => c.year === row.year) : [];
   const near = row.year ? list.filter((c) => c.year && Math.abs(c.year - row.year!) <= 1) : [];
   // Most-linked first stands in for "the one people mean" when nothing else decides.
   const ordered = [...exactYear, ...near.filter((c) => !exactYear.includes(c)), ...[...list].filter((c) => !near.includes(c)).sort((a, b) => (b.links ?? 0) - (a.links ?? 0))];
-  const sure = exactYear.length === 1 || (near.length === 1 && !exactYear.length) || (!row.year && list.length === 1);
+  const sure = !wrongKind && (exactYear.length === 1 || (near.length === 1 && !exactYear.length) || (!row.year && list.length === 1));
   return { candidates: ordered.slice(0, 5).map(({ links: _links, ...m }) => m), pick: 0, sure };
 }
 
@@ -286,18 +314,16 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
       const merged = [...it.candidates, ...found.filter((f) => !it.candidates.some((c) => (f.qid && c.qid === f.qid) || (f.tvmaze && c.tvmaze === f.tvmaze)))];
       const best = choose(it.row, merged);
       const top = best.candidates[0];
-      // A search hit is trusted only when its title is exactly the one given and the year agrees.
-      const exact = !!top && k(top.name) === k(it.row.name) && (!it.row.year || top.year === it.row.year);
-      Object.assign(it, { ...best, sure: best.sure || (exact && !!it.row.year) });
+      const same = (c: Match) => k(c.name) === k(it.row.name);
+      // Search finds look-alikes ("Heat" → "The Heat"): a hit is added without asking only when its
+      // title is exactly the one given and the year agrees, or, without a year, it is the only one of that name.
+      const exact = !!top && same(top) && (it.row.year ? top.year === it.row.year : best.candidates.filter(same).length === 1);
+      Object.assign(it, { ...best, sure: exact });
     }
     tick();
   }
 
-  for (const it of items) {
-    const m = it.candidates[it.pick];
-    const own = m && library.find((t) => (m.qid && (t.id === `wd:${m.qid}` || t.qid === m.qid)) || (m.tvmaze && t.tvmaze === m.tvmaze));
-    if (own) it.owned = own.id;
-  }
+  for (const it of items) for (const c of it.candidates) c.owned = ownedId(c, library);
   return items;
 }
 
@@ -307,71 +333,130 @@ export type ShowPlan = 'all' | 'partly';
 export interface Outcome {
   added: string[];
   updated: number;
+  /** Lines that named a title already given earlier in the same list (a diary's rewatches) */
+  merged: number;
   failed: { row: Row; error: string }[];
   /** Series to place with the "seen up to" picker */
   toPlace: string[];
 }
 
-/** Ratings and dates for a title that is new, or only fills gaps in one you already have. */
+/**
+ * Ratings and dates for a title that is new, or only fills gaps in one you already have. A film on your
+ * want list that the history says you watched becomes watched; nothing else you recorded is changed.
+ */
 export function patchFor(row: Row, existing?: Title): Partial<Title> {
   const p: Partial<Title> = {};
   if (row.rating && existing?.rating === undefined) p.rating = row.rating;
-  if (!existing) {
+  const upgrade = existing?.kind === 'film' && existing.status === 'want' && row.status === 'watched';
+  if (!existing || upgrade) {
     p.status = row.status;
-    if (row.status === 'watched' && row.date) p.finishedAt = row.date;
+    if (row.status === 'watched' && row.date && !existing?.finishedAt) p.finishedAt = row.date;
   }
   return p;
 }
 
 /**
+ * One row per title. A Letterboxd diary lists a film once per viewing: keep the latest rating and date,
+ * "watched" over "want", and the furthest episode reached.
+ */
+export function mergeRows(rows: Row[]): Row {
+  const latest = [...rows].sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  const furthest = rows.map((r) => r.upTo).filter((u) => !!u).sort((a, b) => b!.season - a!.season || b!.episode - a!.episode)[0];
+  return {
+    ...rows[0],
+    rating: latest.find((r) => r.rating)?.rating,
+    date: latest[0].date,
+    status: rows.some((r) => r.status === 'watched') ? 'watched' : rows[0].status,
+    ...(furthest ? { upTo: { ...furthest } } : {}),
+  };
+}
+
+const targetKey = (m: Match) => (m.kind === 'film' ? `wd:${m.qid}` : m.tvmaze ? `tvm:${m.tvmaze}` : `show:${m.qid ?? `${k(m.name)}|${m.year}`}`);
+
+/**
  * Add what was matched. Films go in batches; series one at a time (TVmaze has its own limits).
  * Running it again with the same file only fills gaps: nothing already here is overwritten.
+ * Ownership is checked again here, against the choice actually made and the library as it is now.
  */
 export async function commit(items: Item[], plans: Record<number, ShowPlan>, progress: (done: number, total: number) => void): Promise<Outcome> {
-  const out: Outcome = { added: [], updated: 0, failed: [], toPlace: [] };
-  const chosen = items.map((it, i) => ({ it, i, m: it.candidates[it.pick] })).filter((x) => x.m);
+  const out: Outcome = { added: [], updated: 0, merged: 0, failed: [], toPlace: [] };
+  const groups = new Map<string, { i: number; m: Match; rows: Row[]; partly: boolean }>();
+  items.forEach((it, i) => {
+    const m = it.candidates[it.pick];
+    if (!m) return;
+    const g = groups.get(targetKey(m));
+    if (g) {
+      g.rows.push(it.row);
+      g.partly ||= plans[i] === 'partly';
+      out.merged++;
+    } else groups.set(targetKey(m), { i, m, rows: [it.row], partly: plans[i] === 'partly' });
+  });
+  const chosen = [...groups.values()].map((g) => ({ ...g, row: mergeRows(g.rows) }));
+  const library = await db.titles.toArray();
   let done = 0;
   const tick = (n = 1) => progress((done += n), chosen.length);
 
-  for (const { it } of chosen.filter((x) => x.it.owned)) {
-    const t = await db.titles.get(it.owned!);
-    const p = t ? patchFor(it.row, t) : {};
+  async function fill(id: string, row: Row) {
+    const t = await db.titles.get(id);
+    const p = t ? patchFor(row, t) : {};
     if (t && Object.keys(p).length) {
       await update(t.id, p);
       out.updated++;
     }
-    tick();
   }
 
-  const films = chosen.filter((x) => !x.it.owned && x.m.kind === 'film' && x.m.qid);
+  const owned = chosen.flatMap((x) => {
+    const id = ownedId(x.m, library);
+    return id ? [{ ...x, id }] : [];
+  });
+  for (const x of owned) {
+    try {
+      await fill(x.id, x.row);
+    } catch (e) {
+      out.failed.push({ row: x.row, error: errorText(e) });
+    }
+    tick();
+  }
+  const fresh = chosen.filter((x) => !owned.some((o) => o.i === x.i));
+
+  const films = fresh.filter((x) => x.m.kind === 'film' && x.m.qid);
   for (let i = 0; i < films.length; i += 50) {
     const batch = films.slice(i, i + 50);
     try {
-      const added = await addFilms(batch.map(({ it, m }) => ({ qid: m.qid!, patch: patchFor(it.row) })));
+      const added = await addFilms(batch.map(({ row, m }) => ({ qid: m.qid!, patch: patchFor(row) })));
       out.added.push(...added);
-      for (const { it, m } of batch) if (!added.includes(`wd:${m.qid}`) && !(await db.titles.get(`wd:${m.qid}`))) out.failed.push({ row: it.row, error: 'No longer on Wikidata' });
+      for (const { row, m } of batch) {
+        if (added.includes(`wd:${m.qid}`)) continue;
+        if (await db.titles.get(`wd:${m.qid}`)) await fill(`wd:${m.qid}`, row); // added meanwhile
+        else out.failed.push({ row, error: 'No longer on Wikidata' });
+      }
     } catch (e) {
-      out.failed.push(...batch.map(({ it }) => ({ row: it.row, error: errorText(e) })));
+      out.failed.push(...batch.map(({ row }) => ({ row, error: errorText(e) })));
     }
     tick(batch.length);
   }
 
-  for (const { it, i, m } of chosen.filter((x) => !x.it.owned && x.m.kind === 'show')) {
+  for (const { row, m, partly } of fresh.filter((x) => x.m.kind === 'show')) {
     try {
       const tvm = m.tvmaze ?? (await findShow(m.name, m.year));
       if (!tvm) throw new Error('Not on TVmaze, so its episodes cannot be tracked');
-      const id = await addShow(tvm);
-      out.added.push(id);
-      await update(id, patchFor(it.row));
-      const eps = await db.episodes.where('titleId').equals(id).toArray();
-      const at = it.row.upTo && eps.find((e) => e.season === it.row.upTo!.season && e.number === it.row.upTo!.episode);
-      if (at) await setProgress(id, at);
-      else if (it.row.upTo || (it.row.status === 'watched' && plans[i] === 'partly')) {
-        await update(id, { status: 'watching' });
-        out.toPlace.push(id);
-      } else if (it.row.status === 'watched') await seenAllAired(id);
+      const id = `tvm:${tvm}`;
+      if (await db.titles.get(id)) {
+        await fill(id, row); // found by name, but already in the library
+      } else {
+        await addShow(tvm);
+        out.added.push(id);
+        await update(id, patchFor(row));
+        const eps = await db.episodes.where('titleId').equals(id).toArray();
+        const at = row.upTo && eps.find((e) => e.season === row.upTo!.season && e.number === row.upTo!.episode);
+        if (at) await setProgress(id, at);
+        else if (row.upTo || (row.status === 'watched' && partly)) {
+          await update(id, { status: 'watching' });
+          out.toPlace.push(id);
+        } else if (row.status === 'watched') await seenAllAired(id);
+      }
     } catch (e) {
-      out.failed.push({ row: it.row, error: errorText(e) });
+      out.failed.push({ row, error: errorText(e) });
     }
     tick();
     await sleep(400); // each series is three TVmaze/Wikidata calls; stay well inside their limits

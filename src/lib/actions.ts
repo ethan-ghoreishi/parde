@@ -27,20 +27,27 @@ export async function addFilm(qid: string): Promise<string> {
 
 /**
  * Many films at once (an import): metadata 50 per request, with patience when Wikimedia is busy.
- * Films already here are left alone. Returns the ids actually added.
+ * Films already here are left alone, including any added while the metadata was loading.
+ * Returns the ids actually added.
  */
 export async function addFilms(entries: { qid: string; patch: Partial<Title> }[]): Promise<string[]> {
-  const have = new Set((await db.titles.bulkGet(entries.map((e) => `wd:${e.qid}`))).filter(Boolean).map((t) => t!.id));
-  const fresh = entries.filter((e) => !have.has(`wd:${e.qid}`));
+  const unique = [...new Map(entries.map((e) => [e.qid, e])).values()];
+  const have = new Set((await db.titles.bulkGet(unique.map((e) => `wd:${e.qid}`))).filter(Boolean).map((t) => t!.id));
+  const fresh = unique.filter((e) => !have.has(`wd:${e.qid}`));
   if (!fresh.length) return [];
   const metas = await filmMetas(fresh.map((e) => e.qid), 3);
   const rows = fresh.flatMap((e) => {
     const m = metas.get(e.qid);
     return m ? [{ ...newTitle(`wd:${e.qid}`, m), ...e.patch }] : [];
   });
-  await db.titles.bulkAdd(rows);
+  const added = await db.transaction('rw', db.titles, async () => {
+    const now = new Set((await db.titles.bulkGet(rows.map((r) => r.id))).filter(Boolean).map((t) => t!.id));
+    const add = rows.filter((r) => !now.has(r.id));
+    await db.titles.bulkAdd(add);
+    return add.map((r) => r.id);
+  });
   persistStorage();
-  return rows.map((t) => t.id);
+  return added;
 }
 
 /**

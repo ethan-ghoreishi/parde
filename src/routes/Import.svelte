@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { parseImport, resolve, commit, type Item, type Outcome, type Row, type ShowPlan } from '../lib/importer';
+  import { parseImport, scaleOf, ownedOf, resolve, commit, type Item, type Outcome, type Row, type ShowPlan } from '../lib/importer';
   import { titleHref } from '../lib/router.svelte';
   import { toast, errorText } from '../lib/ui.svelte';
   import ProgressPicker from '../components/ProgressPicker.svelte';
@@ -8,6 +8,8 @@
   let text = $state('');
   let fileName = $state('');
   let status = $state<Row['status']>('watched');
+  /** For ratings written as bare numbers: undefined until the person says */
+  let outOf = $state<5 | 10 | undefined>();
   let phase = $state<'input' | 'matching' | 'review' | 'adding' | 'done'>('input');
   let items = $state<Item[]>([]);
   let plans = $state<Record<number, ShowPlan>>({});
@@ -15,13 +17,16 @@
   let outcome = $state<Outcome | null>(null);
   let names = $state<Record<string, string>>({});
 
-  const rows = $derived(parseImport(text, status));
-  const sure = $derived(items.filter((it) => it.sure && !it.owned));
-  const unsure = $derived(items.filter((it) => !it.sure && it.candidates.length && !it.owned));
+  const rows = $derived(parseImport(text, status, outOf));
+  const scale = $derived(scaleOf(rows));
+  const sure = $derived(items.filter((it) => it.sure && !ownedOf(it)));
+  // Anything uncertain is shown, even when the best guess is already in your library: it may be the wrong one.
+  const unsure = $derived(items.filter((it) => !it.sure && it.candidates.length));
   const missing = $derived(items.filter((it) => !it.candidates.length));
-  const owned = $derived(items.filter((it) => it.owned));
-  const seenShows = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]?.kind === 'show' && !it.owned && it.row.status === 'watched' && !it.row.upTo));
+  const owned = $derived(items.filter((it) => it.sure && ownedOf(it)));
+  const seenShows = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]?.kind === 'show' && !ownedOf(it) && it.row.status === 'watched' && !it.row.upTo));
   const toAdd = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]).length);
+  const toUpdate = $derived(items.filter((it) => ownedOf(it)).length);
 
   async function pick(e: Event) {
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
@@ -32,6 +37,7 @@
     fileName = file.name;
     // Letterboxd and IMDb watchlists have no ratings: they are things you want to see.
     status = /watchlist/i.test(file.name) ? 'want' : 'watched';
+    outOf = undefined;
   }
 
   async function match() {
@@ -63,7 +69,7 @@
 
   const label = (it: Item, i: number) => {
     const m = it.candidates[i];
-    return `${m.name}${m.year ? ` (${m.year})` : ''} · ${m.kind === 'show' ? 'series' : 'film'}${m.note ? ` · ${m.note.slice(0, 40)}` : ''}`;
+    return `${m.name}${m.year ? ` (${m.year})` : ''} · ${m.kind === 'show' ? 'series' : 'film'}${m.owned ? ' · in your library' : m.note ? ` · ${m.note.slice(0, 40)}` : ''}`;
   };
   const showIndex = (it: Item) => items.indexOf(it);
 </script>
@@ -84,6 +90,13 @@
     <label for="imp-text">…or type or paste a list, one per line</label>
     <textarea id="imp-text" bind:value={text} placeholder={'Heat 1995 9\nPast Lives 8/10\nAmélie ★★★★½\nSeverance S02E03\nThe Bear (series)'}></textarea>
     <p class="small muted">A year makes matching exact. A rating (out of 10, or stars) is optional. For a series, <code>S02E03</code> records where you are.</p>
+    {#if scale.ambiguous}
+      <div class="row" role="group" aria-label="Ratings are out of">
+        <span class="small muted">Your ratings are out of</span>
+        <button class="chip" class:on={outOf !== 10} aria-pressed={outOf !== 10} onclick={() => (outOf = 5)}>5 (stars)</button>
+        <button class="chip" class:on={outOf === 10} aria-pressed={outOf === 10} onclick={() => (outOf = 10)}>10</button>
+      </div>
+    {/if}
     <div class="row" role="group" aria-label="These are">
       <span class="small muted">Lines without a rating are</span>
       <button class="chip" class:on={status === 'watched'} aria-pressed={status === 'watched'} onclick={() => (status = 'watched')}>Seen</button>
@@ -167,14 +180,17 @@
     {/if}
 
     <div class="row">
-      <button class="primary" onclick={add} disabled={!toAdd}>Add {toAdd} title{toAdd === 1 ? '' : 's'}</button>
+      <button class="primary" onclick={add} disabled={!toAdd}>{toAdd - toUpdate ? `Add ${toAdd - toUpdate} title${toAdd - toUpdate === 1 ? '' : 's'}` : 'Update'}{toAdd - toUpdate && toUpdate ? ` and update ${toUpdate}` : ''}</button>
       <button class="ghost" onclick={() => (phase = 'input')}>Back</button>
     </div>
   </section>
 {:else if outcome}
   <section class="card stack">
     <h2>Done</h2>
-    <p>Added {outcome.added.length}{outcome.updated ? `, filled in ${outcome.updated} rating${outcome.updated === 1 ? '' : 's'}` : ''}.</p>
+    <p>
+      Added {outcome.added.length} title{outcome.added.length === 1 ? '' : 's'}{outcome.updated ? `, updated ${outcome.updated} already in your library (missing ratings, or watched)` : ''}.
+      {#if outcome.merged}<span class="muted">{outcome.merged} repeated line{outcome.merged === 1 ? '' : 's'} (rewatches) counted once.</span>{/if}
+    </p>
     {#if outcome.toPlace.length}
       <h3>Where are you in these?</h3>
       <ul class="rows">
