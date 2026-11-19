@@ -35,6 +35,24 @@ export function spearman(pairs: [number, number][]): number {
   return pearson(a.map((x, i) => [x, b[i]]));
 }
 
+/**
+ * Whether a correlation over n titles is more than chance: |t| ≥ 2, roughly the usual 5% level.
+ * With 12 titles that needs r ≈ 0.53; with 30, r ≈ 0.36.
+ */
+export function reliable(r: number, n: number): boolean {
+  if (Number.isNaN(r) || n < 4) return false;
+  if (Math.abs(r) >= 1) return true;
+  return Math.abs(r) * Math.sqrt((n - 2) / (1 - r * r)) >= 2;
+}
+
+/** One from each person in turn, most trusted first, so one prolific director cannot fill the list. */
+export function interleave<T extends { via: string }>(items: T[], order: string[]): T[] {
+  const queues = order.map((q) => items.filter((x) => x.via === q));
+  const out: T[] = [];
+  for (let i = 0; queues.some((q) => q.length > i); i++) for (const q of queues) if (q[i]) out.push(q[i]);
+  return out;
+}
+
 export interface Reference {
   score: number;
   source: string;

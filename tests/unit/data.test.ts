@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, type Episode, type Title } from '../../src/lib/db';
 import { buildBackup, parseBackup, restore, undoRestore, undoInfo } from '../../src/lib/backup';
-import { setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, reconcileShows, refreshTitle, seenAllAired } from '../../src/lib/actions';
+import { logWatch, setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, reconcileShows, refreshTitle, seenAllAired } from '../../src/lib/actions';
 
 const T = (id: string, o: Partial<Title> = {}): Title => ({
   id, kind: 'film', name: id, genres: [], people: [], subjects: [], countries: [], languages: [], critics: [],
@@ -319,6 +319,17 @@ describe('episodes', () => {
   it('dropping a show takes it off the calendar', async () => {
     await setStatus((await db.titles.get('tvm:1'))!, 'dropped');
     expect((await db.titles.get('tvm:1'))?.followed).toBe(false);
+  });
+});
+
+describe('logging a viewing', () => {
+  it('saves the dialog as left: themes and a cleared rating; an older viewing does not move the finish date back', async () => {
+    await db.titles.add(T('wd:Q1', { rating: 7, themes: ['grief'], finishedAt: '2026-03-01' }));
+    await logWatch((await db.titles.get('wd:Q1'))!, { date: '2026-01-01', together: false, themes: ['memory'] });
+    const t = await db.titles.get('wd:Q1');
+    expect(t).toMatchObject({ status: 'watched', themes: ['memory'], finishedAt: '2026-03-01' });
+    expect(t?.rating).toBeUndefined();
+    expect(await db.watches.count()).toBe(1);
   });
 });
 

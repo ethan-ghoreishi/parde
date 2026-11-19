@@ -119,9 +119,26 @@ test('want a film, record trailer keenness, log a watch with partner rating', as
   await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' })).toHaveAttribute('aria-pressed', 'true');
   await page.getByText('See the prompt').click();
   const prompt = page.locator('.assist pre');
-  await expect(prompt).toContainText('My rating: 6/10 (Sara: 9/10)');
+  await expect(prompt).toContainText('My rating: 6/10 (my partner: 9/10)');
+  await expect(prompt).not.toContainText('Sara'); // nobody else's name goes to an assistant
   await expect(prompt).toContainText('What it was about for me: memory');
   await expect(prompt).toContainText('Do not invent opinions');
+
+  // The assistant opens as an empty chat: the prompt travels by clipboard, never in the address.
+  await page.context().route(/claude\.ai/, (r) => r.fulfill({ body: '<title>claude</title>', contentType: 'text/html' }));
+  const [chat] = await Promise.all([page.waitForEvent('popup'), page.getByRole('button', { name: 'Open Claude ↗' }).click()]);
+  await chat.waitForLoadState();
+  expect(chat.url()).toBe('https://claude.ai/new');
+  await chat.close();
+
+  // Cancel in the log dialog really cancels, themes included.
+  await page.getByRole('button', { name: 'Log a rewatch' }).click();
+  const again = page.getByRole('dialog', { name: /Watched/ });
+  await again.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'grief' }).click();
+  await again.getByRole('button', { name: 'Cancel' }).click();
+  await expect(again).toBeHidden();
+  await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'grief' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('a series already part-watched is placed in one step, and Tonight resumes there', async ({ page }) => {

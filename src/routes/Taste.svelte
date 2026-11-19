@@ -4,7 +4,7 @@
   import { titleHref, personHref } from '../lib/router.svelte';
   import {
     EXPECTATIONS, trailerInstinct, versusCritics, makerAffinity, castAffinity, genreAffinity, themeAffinity, contradictions,
-    partnerSplits, counts, decade, rated, mean, type Affinity, type Gap,
+    partnerSplits, counts, decade, rated, mean, reliable, interleave, type Affinity, type Gap,
   } from '../lib/taste';
   import { credits, posters, type Credit } from '../lib/api/wiki';
   import { addFilm } from '../lib/actions';
@@ -46,9 +46,15 @@
 
   /** Words for how sure a pattern is: it is only ever as strong as the number of titles behind it. */
   const strength = (n: number) => (n >= 8 ? 'consistent' : n >= 4 ? 'a pattern' : 'an early sign');
-  const describeR = (x: number) =>
-    Number.isNaN(x) ? 'cannot yet say whether it predicts' : x >= 0.5 ? 'clearly tracks' : x >= 0.25 ? 'loosely tracks' : x > -0.15 ? 'tells you little about' : 'runs against';
-  const affLine = (a: Affinity) => `${a.avg.toFixed(1)} avg · ${a.n} title${a.n > 1 ? 's' : ''}`;
+  // A coefficient is described only when it is more than chance for this many titles.
+  const describeR = (x: number, n: number) =>
+    !reliable(x, n) ? 'shows no reliable link yet with' : x >= 0.5 ? 'clearly tracks' : x > 0 ? 'loosely tracks' : 'runs against';
+  const affLine = (a: Affinity) => `${a.avg.toFixed(1)} avg · ${a.n} title${a.n > 1 ? 's' : ''}${a.n < 4 ? ', an early sign' : ''}`;
+  const ratedFilms = $derived(r.length);
+  const withMakers = $derived(r.filter((t) => t.people.some((p) => p.role !== 'cast' && p.role !== 'composer')).length);
+  const likedNames = $derived(new Set(liked.map((m) => m.key)));
+  // Already on your list, by people you rate highly: the most actionable thing here.
+  const queued = $derived(titles.filter((t) => t.status === 'want' && t.people.some((p) => p.role !== 'cast' && likedNames.has(p.name))).slice(0, 5));
 
   // What would unlock more, said once rather than as a wall of locked cards.
   const pending = $derived(
@@ -76,8 +82,15 @@
   const owned = $derived(new Set(titles.map((t) => t.qid).filter(Boolean)));
   const thisYearN = new Date().getFullYear();
   const visible = $derived(
-    suggestions.filter((s) => s.kind === 'film' && s.year && s.year <= thisYearN && !owned.has(s.qid) && !data.value.dismissed.has(s.qid)).slice(0, 18),
+    interleave(
+      suggestions.filter((s) => s.kind === 'film' && s.year && s.year <= thisYearN && !owned.has(s.qid) && !data.value.dismissed.has(s.qid)),
+      people.map((p) => p.qid),
+    ).slice(0, 18),
   );
+  const why = (qid: string) => {
+    const m = makers.find((x) => x.qid === qid);
+    return m ? `you rate their work ${m.avg.toFixed(1)} across ${m.n}` : 'you rated one of theirs 9 or more';
+  };
 
   async function discover() {
     finding = true;
@@ -150,7 +163,7 @@
           {#if instinct.unsure.n}Of the <strong>{instinct.unsure.n}</strong> you doubted, <strong>{instinct.unsure.above}</strong> did.{/if}
         </p>
         {#if instinct.n >= 12}
-          <p class="small">Across {instinct.n} titles your trailer read {describeR(instinct.r)} how much you enjoy things (rank correlation {instinct.r.toFixed(2)}).</p>
+          <p class="small">Across {instinct.n} titles your trailer read {describeR(instinct.r, instinct.n)} how much you enjoy things (rank correlation {instinct.r.toFixed(2)}).</p>
         {:else}
           <p class="small muted">{instinct.n} titles so far: {strength(instinct.n)}. A firmer read comes at 12.</p>
         {/if}
@@ -163,9 +176,9 @@
       <section class="card">
         <h2>You and the critics</h2>
         {#if critics.source === 'Metacritic'}
-          <p>Against Metacritic you rate {Math.abs(critics.meanGap) < 3 ? 'about the same' : `${Math.round(Math.abs(critics.meanGap))} points ${critics.meanGap > 0 ? 'warmer' : 'colder'}`} on average, and their scores {describeR(critics.r)} yours ({critics.n} titles).</p>
+          <p>Against Metacritic you rate {Math.abs(critics.meanGap) < 3 ? 'about the same' : `${Math.round(Math.abs(critics.meanGap))} points ${critics.meanGap > 0 ? 'warmer' : 'colder'}`} on average, and their scores {describeR(critics.r, critics.n)} yours ({critics.n} of your {ratedFilms} rated titles have a Metacritic score).</p>
         {:else}
-          <p>How many critics liked something {describeR(critics.r)} how much you do ({critics.n} titles with a Rotten Tomatoes score). The Tomatometer counts positive reviews, so it is not compared point for point.</p>
+          <p>How many critics liked something {describeR(critics.r, critics.n)} how much you do ({critics.n} of your {ratedFilms} rated titles have a Rotten Tomatoes score). The Tomatometer counts positive reviews, so it is not compared point for point.</p>
         {/if}
         {#if critics.warmer.length}<h3>You liked, critics less so</h3>{@render gapList(critics.warmer, 'critics')}{/if}
         {#if critics.colder.length}<h3>Critics liked, you less so</h3>{@render gapList(critics.colder, 'critics')}{/if}
@@ -177,7 +190,11 @@
       <section class="card">
         <h2>Directors and writers</h2>
         {#if liked.length}<h3>Above your average</h3>{@render affList(liked, true)}{/if}
+        {#if queued.length}
+          <p class="small note">Already on your list by them: {#each queued as t, i}<a href={titleHref(t.id)}>{t.name}</a>{i < queued.length - 1 ? ', ' : ''}{/each}.</p>
+        {/if}
         {#if notYours.length}<h3>Not really your people</h3>{@render affList(notYours, true)}{/if}
+        {#if withMakers < ratedFilms}<p class="small muted">From {withMakers} of your {ratedFilms} rated titles; the rest have no director or writer listed.</p>{/if}
       </section>
     {/if}
 
@@ -226,33 +243,10 @@
       </section>
     {/if}
 
-    {#if decades.length >= 2}
-      <section class="card">
-        <h2>Across time and place</h2>
-        <div class="bars" role="list" aria-label="Watched titles by decade">
-          {#each decades as [d, n]}
-            {@const max = Math.max(...decades.map((x) => x[1]))}
-            <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
-          {/each}
-        </div>
-        {#if countries.length}<p class="small" style="margin-top: 0.75rem"><span class="muted">From</span> {countries.map(([c, n]) => `${c} (${n})`).join(', ')}</p>{/if}
-      </section>
-    {/if}
   </div>
 
   {#if pending.length}
     <p class="small muted pending">Still learning: {pending.join('; ')}.</p>
-  {/if}
-
-  {#if diary.length}
-    <section class="section">
-      <h2>Recently finished</h2>
-      <ul class="diary small">
-        {#each diary as t (t.id)}
-          <li><span class="muted">{formatDay(t.finishedAt!.slice(0, 10))}</span> <a href={titleHref(t.id)}>{t.name}</a> {#if t.rating}<span class="chip">{t.rating}/10</span>{/if}</li>
-        {/each}
-      </ul>
-    </section>
   {/if}
 
   <section class="section">
@@ -274,6 +268,7 @@
             <div>
               <div class="name">{s.name}</div>
               <div class="small muted">{s.year ?? ''} · <a href={personHref(s.via, nameOf.get(s.via) ?? '')}>{nameOf.get(s.via)}</a> {s.roles[0]}</div>
+              <div class="small muted">{why(s.via)}</div>
             </div>
             <div class="row">
               <button class="small primary" onclick={() => want(s)}>Want</button>
@@ -283,6 +278,30 @@
         {/each}
       </ul>
     {/if}
+  </section>
+
+  {#if diary.length}
+    <section class="section">
+      <h2>Recently finished</h2>
+      <ul class="diary small">
+        {#each diary as t (t.id)}
+          <li><span class="muted">{formatDay(t.finishedAt!.slice(0, 10))}</span> <a href={titleHref(t.id)}>{t.name}</a> {#if t.rating}<span class="chip">{t.rating}/10</span>{/if}</li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+{/if}
+
+{#if decades.length >= 2}
+  <section class="section card">
+      <h2>Across time and place</h2>
+      <div class="bars" role="list" aria-label="Watched titles by decade">
+        {#each decades as [d, n]}
+          {@const max = Math.max(...decades.map((x) => x[1]))}
+          <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
+        {/each}
+      </div>
+      {#if countries.length}<p class="small" style="margin-top: 0.75rem"><span class="muted">From</span> {countries.map(([c, n]) => `${c} (${n})`).join(', ')}</p>{/if}
   </section>
 {/if}
 

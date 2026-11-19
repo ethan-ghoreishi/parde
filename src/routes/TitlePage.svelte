@@ -6,7 +6,7 @@
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
   import { EXPECTATIONS, criticScore, referenceText } from '../lib/taste';
-  import { questionsFor, reflectPrompt, reviewPrompt, recapPrompt, claudeUrl, chatgptUrl, type ReviewOptions } from '../lib/handoff';
+  import { questionsFor, reflectPrompt, reviewPrompt, recapPrompt, ASSISTANTS, type ReviewOptions } from '../lib/handoff';
   import { toast, errorText, copy } from '../lib/ui.svelte';
   import { go, personHref } from '../lib/router.svelte';
   import { editLink } from '../lib/actions';
@@ -109,9 +109,10 @@
     go('/library');
   }
 
-  function handoff(prompt: string) {
-    copy(prompt);
-    window.open(claudeUrl(prompt), '_blank', 'noopener,noreferrer');
+  /** Copy first (inside the tap, as browsers require), then open an empty chat to paste into. */
+  function handoff(prompt: string, where: keyof typeof ASSISTANTS = 'claude') {
+    copy(prompt, 'Prompt copied: paste it into the new chat');
+    window.open(ASSISTANTS[where], '_blank', 'noopener,noreferrer');
   }
 
   // ----- After watching: a review or a deeper look, written by an assistant of your choice -----
@@ -121,12 +122,12 @@
   const prompt = $derived.by(() => {
     if (!t) return '';
     const cur = { ...t, note: note ?? t.note };
-    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts, partnerQ.value) : reflectPrompt(cur, libraryQ.value, partnerQ.value);
+    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts) : reflectPrompt(cur, libraryQ.value);
   });
-  function send(where: 'copy' | 'claude' | 'chatgpt') {
+  function send(where: 'copy' | keyof typeof ASSISTANTS) {
     saveNote();
-    copy(prompt);
-    if (where !== 'copy') window.open((where === 'claude' ? claudeUrl : chatgptUrl)(prompt), '_blank', 'noopener,noreferrer');
+    if (where === 'copy') copy(prompt);
+    else handoff(prompt, where);
   }
 
   const trailerSearch = $derived(t ? `https://www.youtube.com/results?search_query=${encodeURIComponent(`${t.name} ${t.year ?? ''} ${t.kind === 'show' ? 'season 1 ' : ''}official trailer`)}` : '');
@@ -210,7 +211,7 @@
           <p class="small"><strong>{code(e)} {e.name}.</strong> {e.summary}</p>
         {/each}
         <button class="small" onclick={() => handoff(recapPrompt(t, prog.lastSeen!))}>Fuller recap in Claude ↗</button>
-        <p class="small muted">Only episodes you have seen. The Claude prompt is copied too, and asks for nothing past {code(prog.lastSeen!)}.</p>
+        <p class="small muted">Only episodes you have seen. Copies a prompt that asks for nothing past {code(prog.lastSeen!)} and opens a new Claude chat to paste it into.</p>
       </section>
     {/if}
 
@@ -287,7 +288,7 @@
                 <summary class="small muted">See the prompt</summary>
                 <pre class="small">{prompt}</pre>
               </details>
-              <p class="small muted">Built only from your rating, themes and notes; it asks the assistant not to invent opinions and to mark guesses. The prompt is copied, so paste it if the page opens empty. {mode === 'review' ? 'Paste its closing “Themes:” line into your own word box above.' : ''}</p>
+              <p class="small muted">Built only from your rating, themes and notes (your partner is just “my partner”); it asks the assistant not to invent opinions and to mark guesses. Opening copies the prompt and starts an empty chat: paste it there. Nothing is sent until you do. {mode === 'review' ? 'Paste its closing “Themes:” line into your own word box above.' : ''}</p>
             </div>
           {/if}
         </section>

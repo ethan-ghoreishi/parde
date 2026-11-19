@@ -205,13 +205,18 @@ export async function setStatus(t: Title, status: Status) {
 /** Expectations only mean something if recorded before watching: keep the time. */
 export const setExpectation = (id: string, v: number | undefined) => update(id, { expectation: v, expectedAt: v ? now() : undefined });
 
-/** Record one viewing. Films become watched; a show's finish is recorded the same way. */
-export async function logWatch(t: Title, opts: { date: string; together: boolean; rating?: number; partnerRating?: number }) {
+/**
+ * Record one viewing. Films become watched; a show's finish is recorded the same way. The dialog's
+ * rating and themes are what you left there: clearing one clears it.
+ */
+export async function logWatch(t: Title, opts: { date: string; together: boolean; rating?: number; partnerRating?: number; themes?: string[] }) {
   await db.transaction('rw', db.titles, db.watches, async () => {
     await db.watches.add({ id: uid(), titleId: t.id, date: opts.date, together: opts.together });
-    const patch: Partial<Title> = { status: 'watched', finishedAt: opts.date };
-    if (opts.rating) patch.rating = opts.rating;
-    if (opts.partnerRating) patch.partnerRating = opts.partnerRating;
+    // finishedAt is the latest viewing: logging an older one does not move it back.
+    const latest = !t.finishedAt || opts.date >= t.finishedAt.slice(0, 10) ? opts.date : t.finishedAt;
+    const patch: Partial<Title> = { status: 'watched', finishedAt: latest, rating: opts.rating };
+    if (opts.together) patch.partnerRating = opts.partnerRating;
+    if (opts.themes) patch.themes = opts.themes.length ? opts.themes : undefined;
     await update(t.id, patch);
   });
 }

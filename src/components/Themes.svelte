@@ -9,7 +9,11 @@
    * "What was it about for you?" as a few taps. Suggestions come from Wikidata's subjects for this
    * title, the words you have used before, and a short starter list; your own words always work too.
    */
-  let { title, compact = false }: { title: Title; compact?: boolean } = $props();
+  /**
+   * Saves each tap straight away, unless `onchange` is given: then the caller holds the draft (the log
+   * dialog saves it only on Save, so Cancel really cancels).
+   */
+  let { title, compact = false, value, onchange }: { title: Title; compact?: boolean; value?: string[]; onchange?: (themes: string[]) => void } = $props();
   const uid = $props.id();
 
   const STARTERS = [
@@ -18,7 +22,7 @@
   ];
 
   const used = live(() => () => db.titles.toArray().then((ts) => counts(ts.flatMap((t) => t.themes ?? []), 12).map(([k]) => k)), [] as string[]);
-  const chosen = $derived(title.themes ?? []);
+  const chosen = $derived(value ?? title.themes ?? []);
   const suggestions = $derived(
     [...new Set([...title.subjects.map((s) => s.toLowerCase()).filter((s) => s.length <= 30).slice(0, 5), ...used.value, ...STARTERS])]
       .filter((x) => !chosen.includes(x))
@@ -26,7 +30,7 @@
   );
   let custom = $state('');
 
-  const set = (themes: string[]) => update(title.id, { themes: themes.length ? themes : undefined });
+  const set = (themes: string[]) => (onchange ? onchange(themes) : update(title.id, { themes: themes.length ? themes : undefined }));
   const toggle = (k: string) => set(chosen.includes(k) ? chosen.filter((x) => x !== k) : [...chosen, k]);
   function addCustom() {
     const more = parseThemes(custom);

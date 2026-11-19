@@ -95,8 +95,8 @@ import { reviewPrompt, parseThemes } from '../../src/lib/handoff';
 describe('review prompt', () => {
   it('uses only what you said, marks guesses, and closes the themes loop', () => {
     const t = T({ name: 'Past Lives', year: 2023, rating: 9, partnerRating: 7, themes: ['memory', 'belonging'], note: 'the bar scene', expectation: 3, expectedAt: '2026-01-01', finishedAt: '2026-02-01' });
-    const p = reviewPrompt(t, [t], { length: 'short', spoilers: false }, 'Sara');
-    expect(p).toContain('My rating: 9/10 (Sara: 7/10)');
+    const p = reviewPrompt(t, [t], { length: 'short', spoilers: false });
+    expect(p).toContain('My rating: 9/10 (my partner: 7/10)'); // no one else's name leaves the device
     expect(p).toContain('memory, belonging');
     expect(p).toContain('the bar scene');
     expect(p).toMatch(/Do not invent opinions/);
@@ -109,5 +109,21 @@ describe('review prompt', () => {
   it('reads a pasted "Themes:" line', () => {
     expect(parseThemes('Themes: Memory; belonging; the road not taken.')).toEqual(['memory', 'belonging', 'the road not taken']);
     expect(parseThemes('grief, grief')).toEqual(['grief']);
+  });
+});
+
+import { reliable, interleave } from '../../src/lib/taste';
+describe('evidence', () => {
+  it('calls a correlation reliable only when it beats chance for that many titles', () => {
+    expect(reliable(0.5, 12)).toBe(false);
+    expect(reliable(0.6, 12)).toBe(true);
+    expect(reliable(0.4, 30)).toBe(true);
+    expect(reliable(-0.7, 12)).toBe(true);
+    expect(reliable(NaN, 40)).toBe(false);
+  });
+  it('takes discoveries from each trusted person in turn', () => {
+    const c = (via: string, n: number) => ({ via, n });
+    const items = [c('a', 1), c('a', 2), c('a', 3), c('b', 1), c('c', 1)];
+    expect(interleave(items, ['b', 'a', 'c']).map((x) => `${x.via}${x.n}`)).toEqual(['b1', 'a1', 'c1', 'a2', 'a3']);
   });
 });
