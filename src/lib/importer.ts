@@ -134,7 +134,9 @@ export function parseImport(text: string, status: Row['status'] = 'watched', out
   let rows: Row[] | null = null;
   if (first.includes(',') && /(^|,)"?(name|title|const|tconst|letterboxd uri)"?(,|$)/i.test(first)) rows = fromCsv(parseCsv(clean), status);
   rows ??= clean.split(/\r?\n/).flatMap((l, i) => parseLine(l, i + 1, status) ?? []);
-  const scale = outOf ?? scaleOf(rows).outOf;
+  // Your choice applies only while the list leaves it open: a later "Dune 8" settles it as out of 10.
+  const found = scaleOf(rows);
+  const scale = found.ambiguous && outOf ? outOf : found.outOf;
   for (const r of rows) if (r.bare !== undefined) r.rating = within(scale === 5 ? r.bare * 2 : r.bare);
   return rows;
 }

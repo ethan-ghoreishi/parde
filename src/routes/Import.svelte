@@ -25,8 +25,13 @@
   const missing = $derived(items.filter((it) => !it.candidates.length));
   const owned = $derived(items.filter((it) => it.sure && ownedOf(it)));
   const seenShows = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]?.kind === 'show' && !ownedOf(it) && it.row.status === 'watched' && !it.row.upTo));
-  const toAdd = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]).length);
-  const toUpdate = $derived(items.filter((it) => ownedOf(it)).length);
+  // Distinct titles: a diary's rewatches are one title.
+  const picked = (it: Item) => {
+    const m = it.candidates[it.pick];
+    return m && (m.owned ?? `${m.kind}:${m.qid ?? m.tvmaze ?? m.name}`);
+  };
+  const toAdd = $derived(new Set(items.map(picked).filter(Boolean)).size);
+  const toUpdate = $derived(new Set(items.map(ownedOf).filter(Boolean)).size);
 
   async function pick(e: Event) {
     const file = (e.currentTarget as HTMLInputElement).files?.[0];

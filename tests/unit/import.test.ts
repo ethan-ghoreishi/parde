@@ -57,6 +57,7 @@ describe('import parsing', () => {
     expect(scaleOf(parseImport(low))).toEqual({ outOf: 5, ambiguous: true });
     expect(parseImport(low).map((r) => r.rating)).toEqual([9, 6]);
     expect(parseImport(low, 'watched', 10).map((r) => r.rating)).toEqual([5, 3]);
+    expect(parseImport('Heat 4\nDune 8', 'watched', 5).map((r) => r.rating)).toEqual([4, 8]); // an earlier choice cannot override a list that is clearly out of 10
     expect(parseImport('Heat 4/5\nUp 4/10').map((r) => r.rating)).toEqual([8, 4]); // written scales are never guessed
     expect(scaleOf(parseImport('Heat 4/5\nUp 4/10')).ambiguous).toBe(false);
     const generic = 'Title,Year,Rating\nHeat,1995,4\nUp,2009,3.5\n';
