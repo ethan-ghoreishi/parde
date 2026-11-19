@@ -1,7 +1,7 @@
 import { db, getSetting, now, setSetting, uid, type Episode, type Link, type Status, type Title } from './db';
 import { fetchShow, showUpdates, toEpisode } from './api/tvmaze';
 import { filmMeta, filmMetas, qidForImdb, wikidataMeta, type Meta } from './api/wiki';
-import { byOrder, isAired } from './schedule';
+import { byOrder, isAired, progress } from './schedule';
 import { cleanUrl, replaceHost, hostOf } from './links';
 
 const defined = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
@@ -43,8 +43,11 @@ export async function addFilms(entries: { qid: string; patch: Partial<Title> }[]
   return rows.map((t) => t.id);
 }
 
-/** Wikidata adds critics, subjects, countries and linked people to a TVmaze show, when it can be found. */
-async function enrichShow(meta: Meta): Promise<Meta> {
+/**
+ * Wikidata adds critics, subjects, countries and linked people to a TVmaze show, when it can be found.
+ * Undefined when Wikidata could not be asked (busy, offline): callers keep what they had.
+ */
+async function enrichShow(meta: Meta): Promise<Meta | undefined> {
   if (!meta.imdb) return meta;
   try {
     const qid = await qidForImdb(meta.imdb);
@@ -63,12 +66,14 @@ async function enrichShow(meta: Meta): Promise<Meta> {
       trailer: wd.trailer,
     };
   } catch {
-    return meta; // enrichment is a bonus; the show itself is already good
+    return undefined;
   }
 }
 
 async function saveEpisodes(titleId: string, raw: Parameters<typeof toEpisode>[1][]) {
   const eps = raw.map((e) => toEpisode(titleId, e)).filter((e): e is Episode => !!e);
+  // An empty list is a broken or partial reply, not a show that lost every episode: keep what we have.
+  if (!eps.length) return;
   const keep = new Set(eps.map((e) => e.id));
   await db.transaction('rw', db.episodes, db.seen, async () => {
     const gone = (await db.episodes.where('titleId').equals(titleId).toArray()).filter((e) => !keep.has(e.id));
@@ -79,9 +84,10 @@ async function saveEpisodes(titleId: string, raw: Parameters<typeof toEpisode>[1
       const marks = await db.seen.bulkGet(gone.map((e) => e.id));
       const moved = marks.flatMap((m, i) => {
         const to = m && slot.get(`${gone[i].season}x${gone[i].number}`);
-        return to ? [{ ...m, episodeId: to }] : [];
+        return to ? [{ from: m.episodeId, mark: { ...m, episodeId: to } }] : [];
       });
-      await db.seen.bulkPut(moved);
+      await db.seen.bulkPut(moved.map((x) => x.mark));
+      await db.seen.bulkDelete(moved.map((x) => x.from));
       await db.episodes.bulkDelete(gone.map((e) => e.id));
     }
     await db.episodes.bulkPut(eps);
@@ -92,7 +98,7 @@ export async function addShow(tvmaze: number): Promise<string> {
   const id = `tvm:${tvmaze}`;
   if (await db.titles.get(id)) return id;
   const { meta, episodes } = await fetchShow(tvmaze);
-  const full = await enrichShow(meta);
+  const full = (await enrichShow(meta)) ?? meta;
   await db.transaction('rw', db.titles, db.episodes, db.seen, async () => {
     await db.titles.add({ ...newTitle(id, full), syncedAt: now() });
     await saveEpisodes(id, episodes);
@@ -107,18 +113,21 @@ export async function refreshTitle(t: Title, deep = false) {
     const { meta, episodes } = await fetchShow(t.tvmaze);
     // Wikidata changes slowly: re-enrich monthly, not on every episode sync.
     const reEnrich = deep || !t.enrichedAt || Date.now() - Date.parse(t.enrichedAt) > 30 * 864e5;
-    const full = reEnrich ? await enrichShow(meta) : { ...meta, ...pickWd(t), critics: [...meta.critics, ...t.critics.filter((c) => c.source !== 'TVmaze')] };
+    const enriched = reEnrich ? await enrichShow(meta) : undefined;
+    const kept = { ...meta, ...pickWd(t), critics: [...meta.critics, ...t.critics.filter((c) => c.source !== 'TVmaze')] };
+    // A failed (or suddenly empty) Wikidata lookup keeps the people, subjects and scores found before.
+    const full = enriched && (enriched.qid || !t.qid) ? enriched : kept;
     await db.transaction('rw', db.titles, db.episodes, db.seen, async () => {
       const cur = await db.titles.get(t.id);
       if (!cur) return;
-      await db.titles.put({ ...cur, ...defined(full), syncedAt: now(), enrichedAt: reEnrich ? now() : cur.enrichedAt });
+      await db.titles.put({ ...cur, ...defined(full), syncedAt: now(), enrichedAt: enriched ? now() : cur.enrichedAt });
       await saveEpisodes(t.id, episodes);
     });
     await reconcile(t.id, false);
   } else if (t.qid) {
     const meta = await filmMeta(t.qid);
-    const cur = await db.titles.get(t.id);
-    if (cur) await db.titles.put({ ...cur, ...defined(meta), enrichedAt: now() });
+    // update() merges into the stored record, so a rating made while this was loading is kept.
+    await db.titles.update(t.id, { ...defined(meta), enrichedAt: now() });
   }
 }
 
@@ -220,27 +229,36 @@ const episodesOf = async (titleId: string) => (await db.episodes.where('titleId'
 const seenOf = async (titleId: string) => new Set(await db.seen.where('titleId').equals(titleId).primaryKeys());
 
 /**
- * Keep a show's status in step with its episode marks.
- * - every episode of an ended show seen → watched, and off the calendar
- * - a finished show whose next episode (after the last one seen) is out → watching again: a new season
+ * Keep a show's status in step with its episode marks. "Where you are" is the furthest episode seen;
+ * an earlier one left unmarked does not hold a show back.
+ * - seen through to the last episode of an ended show → watched, and off the calendar
+ * - a finished show whose next episode is out → watching again: a new season (in the background, only
+ *   while it is still on your calendar)
  * - after you mark something: a show you wanted or paused → watching
+ * Paused and dropped are your decisions: the background never changes them, and only a status you pick
+ * changes dropped.
  */
 export async function reconcile(titleId: string, byUser = true) {
   const t = await db.titles.get(titleId);
   if (!t || t.kind !== 'show') return;
-  const eps = await episodesOf(titleId);
-  const seen = await seenOf(titleId);
-  const last = eps.findLastIndex((e) => seen.has(e.id));
-  const after = last >= 0 ? eps[last + 1] : undefined;
+  const p = progress(await episodesOf(titleId), await seenOf(titleId));
   let patch: Partial<Title> | undefined;
-  if (eps.length && eps.every((e) => seen.has(e.id)) && t.showStatus === 'Ended') {
+  if (t.status === 'dropped' || (t.status === 'paused' && !byUser)) {
+    // your decision: leave it
+  } else if (p.lastSeen && !p.next && t.showStatus === 'Ended') {
     if (t.status !== 'watched') patch = { status: 'watched', finishedAt: t.finishedAt ?? now(), followed: false };
-  } else if (t.status === 'watched' && after && isAired(after)) {
+  } else if (t.status === 'watched' && p.lastSeen && p.next && isAired(p.next) && (byUser || t.followed)) {
     patch = { status: 'watching' };
-  } else if (byUser && last >= 0 && (t.status === 'want' || t.status === 'paused')) {
+  } else if (byUser && p.lastSeen && (t.status === 'want' || t.status === 'paused')) {
     patch = { status: 'watching' };
   }
   if (patch || byUser) await update(titleId, patch ?? {});
+}
+
+/** On this device only, no network: finished shows whose next episode has come out since are back in progress. */
+export async function reconcileShows() {
+  const done = await db.titles.where('status').equals('watched').filter((t) => t.kind === 'show').primaryKeys();
+  for (const id of done) await reconcile(id, false);
 }
 
 async function markSeen(titleId: string, eps: Episode[]) {
@@ -275,10 +293,14 @@ export async function setProgress(titleId: string, ep: Episode | null): Promise<
   const before = await db.seen.where('titleId').equals(titleId).toArray();
   const t = await db.titles.get(titleId);
   const eps = await episodesOf(titleId);
+  const upTo = new Set(ep ? eps.filter((e) => byOrder(e, ep) <= 0).map((e) => e.id) : []);
+  const listed = new Set(eps.map((e) => e.id));
+  const had = new Set(before.map((m) => m.episodeId));
   await db.transaction('rw', db.seen, async () => {
-    await db.seen.where('titleId').equals(titleId).delete();
+    // Marks you already had keep their dates; marks for episodes no longer listed are left alone.
+    await db.seen.bulkDelete(before.filter((m) => listed.has(m.episodeId) && !upTo.has(m.episodeId)).map((m) => m.episodeId));
     const stamp = now();
-    await db.seen.bulkPut(ep ? eps.filter((e) => byOrder(e, ep) <= 0).map((e) => ({ episodeId: e.id, titleId, seenAt: stamp })) : []);
+    await db.seen.bulkPut([...upTo].filter((id) => !had.has(id)).map((episodeId) => ({ episodeId, titleId, seenAt: stamp })));
   });
   // Back to the very start of something "finished": it is in progress again, not finished.
   if (!ep && t?.status === 'watched') await update(titleId, { status: 'watching' });

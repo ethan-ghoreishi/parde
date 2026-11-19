@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, type Episode, type Title } from '../../src/lib/db';
 import { buildBackup, parseBackup, restore, undoRestore } from '../../src/lib/backup';
-import { setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, refreshTitle, seenAllAired } from '../../src/lib/actions';
+import { setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, reconcileShows, refreshTitle, seenAllAired } from '../../src/lib/actions';
 
 const T = (id: string, o: Partial<Title> = {}): Title => ({
   id, kind: 'film', name: id, genres: [], people: [], subjects: [], countries: [], languages: [], critics: [],
@@ -135,6 +135,47 @@ describe('series progress', () => {
     expect(await seenIds()).toEqual([]);
     expect(await status()).toBe('watching'); // "we are starting it" stays in progress
   });
+  it('"up to here" keeps the dates of marks you already had', async () => {
+    await db.seen.put({ episodeId: 1, titleId: 'tvm:1', seenAt: '2021-05-05T00:00:00Z' });
+    await setProgress('tvm:1', E(3, 1, { season: 2 }));
+    expect((await db.seen.get(1))?.seenAt).toBe('2021-05-05T00:00:00Z');
+    expect(await seenIds()).toEqual([1, 2, 3]);
+  });
+  it('a background refresh never touches a dropped show, and only reopens a finished one still on the calendar', async () => {
+    await setStatus((await db.titles.get('tvm:1'))!, 'watched');
+    await db.titles.update('tvm:1', { followed: false });
+    await db.episodes.update(4, { airdate: '2020-02-01' });
+    await reconcile('tvm:1', false);
+    expect(await status()).toBe('watched'); // you took it off the calendar: a new season does not pull it back
+    await reconcileShows();
+    expect(await status()).toBe('watched');
+    await db.titles.update('tvm:1', { followed: true });
+    await reconcileShows(); // no network: the episode simply came out
+    expect(await status()).toBe('watching');
+    await db.titles.update('tvm:1', { status: 'dropped', showStatus: 'Ended' });
+    await setSeasonSeen('tvm:1', 2, true);
+    await reconcile('tvm:1', false);
+    expect(await status()).toBe('dropped');
+  });
+});
+
+describe('skipped episodes', () => {
+  beforeEach(async () => {
+    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', followed: true, status: 'watching' }));
+    await db.episodes.bulkAdd([E(1, 1), E(2, 2), E(3, 3), E(4, 4)]);
+  });
+  it('an unmarked episode in the middle neither holds the show back nor stops it finishing', async () => {
+    await db.seen.bulkPut([1, 3].map((episodeId) => ({ episodeId, titleId: 'tvm:1', seenAt: 'x' })));
+    const { progress } = await import('../../src/lib/schedule');
+    const p = progress(await db.episodes.toArray(), new Set([1, 3]));
+    expect(p.next?.id).toBe(4);
+    expect(p.skipped).toBe(1);
+    expect(p.unseenAired).toBe(1);
+    await setSeen(E(4, 4), true);
+    const t = await db.titles.get('tvm:1');
+    expect(t?.status).toBe('watched');
+    expect(t?.followed).toBe(false);
+  });
 });
 
 describe('episode refresh', () => {
@@ -152,6 +193,41 @@ describe('episode refresh', () => {
     }
     expect(await db.episodes.get(70)).toBeUndefined();
     expect(await db.seen.get(80)).toMatchObject({ titleId: 'tvm:7' });
+    expect(await db.seen.get(70)).toBeUndefined(); // no orphan left behind
+  });
+
+  const show = (eps: unknown[] | undefined, imdb: string | null = null) => ({
+    id: 7, name: 'Show', genres: [], status: 'Running', premiered: '2020-01-01', averageRuntime: 30, runtime: 30, rating: { average: null },
+    network: null, webChannel: null, externals: { imdb }, image: null, summary: null, updated: 2, ...(eps ? { _embedded: { episodes: eps } } : {}),
+  });
+  const refreshWith = async (body: unknown, deep = false) => {
+    vi.stubGlobal('fetch', vi.fn(async (u: string) => (String(u).includes('tvmaze') ? new Response(JSON.stringify(body)) : new Response('busy', { status: 503 }))));
+    try {
+      await refreshTitle((await db.titles.get('tvm:7'))!, deep);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  };
+  it('an empty or missing episode list from TVmaze keeps the episodes and marks you have', async () => {
+    await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
+    await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
+    await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
+    await refreshWith(show([]));
+    await refreshWith(show(undefined));
+    expect(await db.episodes.where('titleId').equals('tvm:7').count()).toBe(2);
+    expect(await db.seen.get(70)).toBeTruthy();
+  });
+  it('a failed Wikidata lookup keeps the people, subjects and scores found before', async () => {
+    const people = [{ name: 'Dan Erickson', role: 'creator' as const, qid: 'Q1' }];
+    const critics = [{ source: 'Rotten Tomatoes', value: '97%', score: 97 }];
+    await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, qid: 'Q9', status: 'watching', people, subjects: ['work'], critics, enrichedAt: '2000-01-01T00:00:00Z' }));
+    await db.episodes.add(E(70, 1, { titleId: 'tvm:7' }));
+    await refreshWith(show([{ id: 70, name: 'E1', season: 1, number: 1, airdate: '2020-01-01', airtime: '', airstamp: null, runtime: 30, summary: null }], 'tt1'), true);
+    const t = await db.titles.get('tvm:7');
+    expect(t?.people).toEqual(people);
+    expect(t?.subjects).toEqual(['work']);
+    expect(t?.critics).toEqual(critics);
+    expect(t?.enrichedAt).toBe('2000-01-01T00:00:00Z'); // retried next time
   });
 });
 

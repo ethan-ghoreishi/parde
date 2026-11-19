@@ -1,7 +1,7 @@
 <script lang="ts">
   import { db, getSetting, type Status, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { update, setStatus, setExpectation, refreshTitle, removeTitle, setSeen, deleteWatch } from '../lib/actions';
+  import { update, setStatus, setExpectation, refreshTitle, removeTitle, setSeen, seenUpTo, deleteWatch } from '../lib/actions';
   import { progress, code, release, isAired, localDay, byOrder } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
@@ -44,8 +44,10 @@
       .map(([name, roles]) => ({ name, role: roles.join(', '), qid: t?.people.find((p) => p.name === name && p.qid)?.qid })),
   );
   const cast = $derived(t?.people.filter((p) => p.role === 'cast') ?? []);
-  // Once you have watched it, "how keen were you?" would be hindsight: keep it as it was.
-  const expectationLocked = $derived(!!t && (t.status === 'watched' || t.rating !== undefined));
+  // Once you have started or watched it, "how keen were you?" would be hindsight: keep it as it was.
+  const expectationLocked = $derived(
+    !!t && (t.status === 'watched' || t.status === 'watching' || t.status === 'paused' || t.rating !== undefined || prog.seenCount > 0),
+  );
   const provenance = (c: { source: string; asOf?: string }) =>
     `${c.source}${c.source === 'TVmaze' ? ' users' : ', via Wikidata'}${c.asOf ? `, as of ${c.asOf}` : ''}. Scores can be out of date.`;
 
@@ -187,6 +189,12 @@
             </div>
           {:else}
             <p class="muted small">No episodes listed yet.</p>
+          {/if}
+          {#if t.kind === 'show' && prog.skipped}
+            <p class="small muted">
+              {prog.skipped} earlier episode{prog.skipped > 1 ? 's are' : ' is'} not marked seen.
+              <button class="small ghost" onclick={() => seenUpTo(prog.lastSeen!)}>Mark {prog.skipped > 1 ? 'them' : 'it'} seen</button>
+            </p>
           {/if}
         </div>
       </div>

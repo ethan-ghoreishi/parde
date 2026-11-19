@@ -6,7 +6,7 @@
   import { setSeen, editLink, syncShows } from '../lib/actions';
   import { route, go, titleHref } from '../lib/router.svelte';
   import { formatDay } from '../lib/format';
-  import { toast, errorText } from '../lib/ui.svelte';
+  import { toast, errorText, clock } from '../lib/ui.svelte';
   import Poster from '../components/Poster.svelte';
 
   const data = live(
@@ -23,7 +23,7 @@
     { shows: [] as Title[], episodes: [] as Episode[], seen: new Set<number>(), links: [] as Link[] },
   );
 
-  const today = dayKey(new Date());
+  const today = $derived(dayKey(new Date(clock.now)));
   const selected = $derived(/^\d{4}-\d{2}-\d{2}$/.test(route.params.get('d') ?? '') ? route.params.get('d')! : today);
   const byDay = $derived.by(() => {
     const m = new Map<string, Episode[]>();

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { route } from './lib/router.svelte';
-  import { ui } from './lib/ui.svelte';
-  import { syncShows } from './lib/actions';
+  import { ui, clock } from './lib/ui.svelte';
+  import { syncShows, reconcileShows } from './lib/actions';
   import Search from './components/Search.svelte';
   import Tonight from './routes/Tonight.svelte';
   import Calendar from './routes/Calendar.svelte';
@@ -28,11 +28,19 @@
     } catch {
       /* offline or TVmaze down: the calendar shows what we already have */
     }
+    // Episodes already listed can come out without TVmaze changing anything.
+    await reconcileShows().catch(() => {});
   }
 
   onMount(() => {
     sync();
-    const onVisible = () => document.visibilityState === 'visible' && sync();
+    // An installed app can sit in the background for days: "today" moves on when it comes back.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      clock.now = Date.now();
+      sync();
+    };
+    const tick = setInterval(() => (clock.now = Date.now()), 5 * 60e3);
     document.addEventListener('visibilitychange', onVisible);
     const onKey = (e: KeyboardEvent) => {
       const typing = (e.target as HTMLElement)?.closest('input, textarea, select, [contenteditable]');
@@ -43,6 +51,7 @@
     };
     addEventListener('keydown', onKey);
     return () => {
+      clearInterval(tick);
       document.removeEventListener('visibilitychange', onVisible);
       removeEventListener('keydown', onKey);
     };

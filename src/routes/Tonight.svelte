@@ -7,7 +7,7 @@
   import { setSeen, editLink } from '../lib/actions';
   import { titleHref } from '../lib/router.svelte';
   import { formatDay, runtime } from '../lib/format';
-  import { ui, toast } from '../lib/ui.svelte';
+  import { ui, toast, clock } from '../lib/ui.svelte';
   import Poster from '../components/Poster.svelte';
 
   const data = live(
@@ -44,12 +44,12 @@
         const src = p.next ? resolveLinks(data.value.links.filter((l) => l.titleId === t.id), p.next.season, p.next.number).find((r) => !r.link.broken) : undefined;
         return { t, p, src };
       })
-      .filter((x) => x.p.next && isAired(x.p.next))
+      .filter((x) => x.p.next && isAired(x.p.next, new Date(clock.now)))
       .sort((a, b) => Number(a.t.status === 'paused') - Number(b.t.status === 'paused') || b.t.updatedAt.localeCompare(a.t.updatedAt)),
   );
 
-  const today = dayKey(new Date());
-  const weekAhead = dayKey(new Date(Date.now() + 7 * 864e5));
+  const today = $derived(dayKey(new Date(clock.now)));
+  const weekAhead = $derived(dayKey(new Date(clock.now + 7 * 864e5)));
   const upcoming = $derived(
     data.value.episodes
       .filter((e) => data.value.titles.find((t) => t.id === e.titleId)?.followed && !data.value.seen.has(e.id))
@@ -68,7 +68,7 @@
       if (t.kind === 'film' && t.status === 'want') out.push({ title: t, minutes: t.runtime });
       if (t.kind === 'show' && (t.status === 'want' || t.status === 'watching')) {
         const next = progress(byTitle.get(t.id) ?? [], data.value.seen).next;
-        if (next && isAired(next)) out.push({ title: t, episode: next, minutes: next.runtime ?? t.runtime });
+        if (next && isAired(next, new Date(clock.now))) out.push({ title: t, episode: next, minutes: next.runtime ?? t.runtime });
       }
     }
     return out;
@@ -76,6 +76,7 @@
   const genres = $derived([...new Set(candidates.flatMap((c) => c.title.genres))].sort());
   const picks = $derived(scoreCandidates(candidates, data.value.titles, filter));
   const pick = $derived(picks.length ? picks[skip % picks.length] : undefined);
+  const unknownLength = $derived(filter.maxMinutes ? candidates.filter((c) => !c.minutes && (filter.kind === 'any' || c.title.kind === filter.kind)).length : 0);
 
   const backupDue = $derived(
     data.value.titles.length >= 5 && (!data.value.lastBackup || Date.now() - Date.parse(data.value.lastBackup) > 14 * 864e5),
@@ -197,6 +198,7 @@
     {:else}
       <p class="empty">Nothing on your list fits. Loosen the filters.</p>
     {/if}
+    {#if unknownLength}<p class="small muted">{unknownLength} title{unknownLength > 1 ? 's' : ''} of unknown length left out.</p>{/if}
   </section>
 {/if}
 

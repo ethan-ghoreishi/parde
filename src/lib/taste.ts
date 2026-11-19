@@ -126,7 +126,8 @@ export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFil
   const genres = new Map(genreAffinity(library, 2).map((a) => [a.key, a]));
   return cands
     .filter((c) => f.kind === 'any' || c.title.kind === f.kind)
-    .filter((c) => !f.maxMinutes || !c.minutes || c.minutes <= f.maxMinutes)
+    // An unknown length cannot promise to fit a time limit.
+    .filter((c) => !f.maxMinutes || (!!c.minutes && c.minutes <= f.maxMinutes))
     .filter((c) => !f.genre || c.title.genres.includes(f.genre))
     .map((c) => {
       const t = c.title;

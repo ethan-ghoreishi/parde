@@ -72,6 +72,9 @@ describe('choosing', () => {
     const meh = T({ status: 'want', expectation: 2, runtime: 90, genres: ['Comedy'] });
     const picks = scoreCandidates([keen, long, meh].map((t) => ({ title: t, minutes: t.runtime })), [], { kind: 'any', maxMinutes: 130 });
     expect(picks.map((p) => p.c.title)).toEqual([keen, meh]);
+    const unknown = T({ status: 'want', expectation: 5 });
+    expect(scoreCandidates([{ title: unknown }], [], { kind: 'any', maxMinutes: 130 })).toEqual([]); // cannot promise to fit
+    expect(scoreCandidates([{ title: unknown }], [], { kind: 'any' })).toHaveLength(1);
     expect(picks[0].reasons.join()).toMatch(/trailer/);
     expect(scoreCandidates([{ title: keen }], [], { kind: 'show' })).toEqual([]);
     expect(scoreCandidates([{ title: keen }, { title: meh }], [], { kind: 'any', genre: 'Comedy' })[0].c.title).toBe(meh);
