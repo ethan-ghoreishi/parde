@@ -50,7 +50,7 @@
   const describeR = (x: number, n: number) =>
     !reliable(x, n) ? 'shows no reliable link yet with' : x >= 0.5 ? 'clearly tracks' : x > 0 ? 'loosely tracks' : 'runs against';
   const affLine = (a: Affinity) => `${a.avg.toFixed(1)} avg · ${a.n} title${a.n > 1 ? 's' : ''}${a.n < 4 ? ', an early sign' : ''}`;
-  const ratedFilms = $derived(r.length);
+  const ratedN = $derived(r.length);
   const withMakers = $derived(r.filter((t) => t.people.some((p) => p.role !== 'cast' && p.role !== 'composer')).length);
   const likedNames = $derived(new Set(liked.map((m) => m.key)));
   // Already on your list, by people you rate highly: the most actionable thing here.
@@ -176,9 +176,9 @@
       <section class="card">
         <h2>You and the critics</h2>
         {#if critics.source === 'Metacritic'}
-          <p>Against Metacritic you rate {Math.abs(critics.meanGap) < 3 ? 'about the same' : `${Math.round(Math.abs(critics.meanGap))} points ${critics.meanGap > 0 ? 'warmer' : 'colder'}`} on average, and their scores {describeR(critics.r, critics.n)} yours ({critics.n} of your {ratedFilms} rated titles have a Metacritic score).</p>
+          <p>Against Metacritic you rate {Math.abs(critics.meanGap) < 3 ? 'about the same' : `${Math.round(Math.abs(critics.meanGap))} points ${critics.meanGap > 0 ? 'warmer' : 'colder'}`} on average, and their scores {describeR(critics.r, critics.n)} yours ({critics.n} of your {ratedN} rated titles have a Metacritic score).</p>
         {:else}
-          <p>How many critics liked something {describeR(critics.r, critics.n)} how much you do ({critics.n} of your {ratedFilms} rated titles have a Rotten Tomatoes score). The Tomatometer counts positive reviews, so it is not compared point for point.</p>
+          <p>How many critics liked something {describeR(critics.r, critics.n)} how much you do ({critics.n} of your {ratedN} rated titles have a Rotten Tomatoes score). The Tomatometer counts positive reviews, so it is not compared point for point.</p>
         {/if}
         {#if critics.warmer.length}<h3>You liked, critics less so</h3>{@render gapList(critics.warmer, 'critics')}{/if}
         {#if critics.colder.length}<h3>Critics liked, you less so</h3>{@render gapList(critics.colder, 'critics')}{/if}
@@ -194,7 +194,7 @@
           <p class="small note">Already on your list by them: {#each queued as t, i}<a href={titleHref(t.id)}>{t.name}</a>{i < queued.length - 1 ? ', ' : ''}{/each}.</p>
         {/if}
         {#if notYours.length}<h3>Not really your people</h3>{@render affList(notYours, true)}{/if}
-        {#if withMakers < ratedFilms}<p class="small muted">From {withMakers} of your {ratedFilms} rated titles; the rest have no director or writer listed.</p>{/if}
+        {#if withMakers < ratedN}<p class="small muted">From {withMakers} of your {ratedN} rated titles; the rest have no director or writer listed.</p>{/if}
       </section>
     {/if}
 
@@ -294,14 +294,14 @@
 
 {#if decades.length >= 2}
   <section class="section card">
-      <h2>Across time and place</h2>
-      <div class="bars" role="list" aria-label="Watched titles by decade">
-        {#each decades as [d, n]}
-          {@const max = Math.max(...decades.map((x) => x[1]))}
-          <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
-        {/each}
-      </div>
-      {#if countries.length}<p class="small" style="margin-top: 0.75rem"><span class="muted">From</span> {countries.map(([c, n]) => `${c} (${n})`).join(', ')}</p>{/if}
+    <h2>Across time and place</h2>
+    <div class="bars" role="list" aria-label="Watched titles by decade">
+      {#each decades as [d, n]}
+        {@const max = Math.max(...decades.map((x) => x[1]))}
+        <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
+      {/each}
+    </div>
+    {#if countries.length}<p class="small" style="margin-top: 0.75rem"><span class="muted">From</span> {countries.map(([c, n]) => `${c} (${n})`).join(', ')}</p>{/if}
   </section>
 {/if}
 

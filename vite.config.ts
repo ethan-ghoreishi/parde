@@ -64,7 +64,8 @@ export default defineConfig(({ command, mode, isPreview }) => ({
                   handler: 'CacheFirst',
                   options: {
                     cacheName: 'posters',
-                    expiration: { maxEntries: 1500, maxAgeSeconds: 60 * 60 * 24 * 180 },
+                    // Posters are opaque responses, which some browsers count at a large size: on a full quota, drop them, not the app.
+                    expiration: { maxEntries: 1500, maxAgeSeconds: 60 * 60 * 24 * 180, purgeOnQuotaError: true },
                     cacheableResponse: { statuses: [0, 200] },
                   },
                 },

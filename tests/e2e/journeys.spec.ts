@@ -313,3 +313,27 @@ test('when Wikimedia is busy, search says so instead of showing no films', async
   await expect(page.locator('li.hit', { hasText: 'Severance' })).toBeVisible();
   await expect(page.getByText(/Films and people unavailable just now/)).toBeVisible();
 });
+
+test.describe('offline', () => {
+  test.use({ serviceWorkers: 'allow' });
+  test('with no connection the installed app still opens with your collection', async ({ page, context, browserName }) => {
+    test.skip(browserName !== 'chromium', 'Playwright drives service workers reliably only in Chromium');
+    await search(page, 'dune');
+    await page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByRole('button', { name: 'Seen' }).click();
+    await expect(page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByText('Your rating')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+
+    await context.setOffline(true);
+    await page.goto('./#/library');
+    await page.reload(); // the page itself now comes from the service worker's cache
+    await expect(page.locator('.tile', { hasText: 'Dune: Part Two' })).toBeVisible();
+    await page.locator('.tile', { hasText: 'Dune: Part Two' }).click();
+    await expect(page.getByRole('heading', { name: 'Dune: Part Two' })).toBeVisible();
+    await page.getByRole('link', { name: 'Taste' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Your taste' })).toBeVisible();
+    await context.setOffline(false);
+  });
+});
