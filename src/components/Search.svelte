@@ -57,6 +57,7 @@
       shows = [];
       people = [];
       error = '';
+      loading = false;
       return;
     }
     loading = true;
