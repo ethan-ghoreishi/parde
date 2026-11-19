@@ -38,10 +38,13 @@ export const parseThemes = (s: string) => [
   ),
 ];
 
-/** What you have said about it, as plain statements an assistant can work from. Nothing invented. */
-function yourView(t: Title, library: Title[], partner?: string): string[] {
+/**
+ * What you have said about it, as plain statements an assistant can work from. Nothing invented, and
+ * nobody else's name: your partner is "my partner".
+ */
+function yourView(t: Title, library: Title[]): string[] {
   const lines: string[] = [];
-  if (t.rating) lines.push(`My rating: ${t.rating}/10${t.partnerRating ? ` (${partner || 'my partner'}: ${t.partnerRating}/10)` : ''}.`);
+  if (t.rating) lines.push(`My rating: ${t.rating}/10${t.partnerRating ? ` (my partner: ${t.partnerRating}/10)` : ''}.`);
   if (t.expectation && beforeWatching(t)) {
     const exp = (t.expectation - 1) * 25;
     const got = t.rating ? (t.rating - 1) * (100 / 9) : undefined;
@@ -71,8 +74,8 @@ export interface ReviewOptions {
  * A prompt that turns a rating, a few theme words and rough notes into a review in your own voice.
  * It forbids invented opinions and asks for inferences to be marked, so the draft stays yours.
  */
-export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions, partner?: string): string {
-  const view = yourView(t, library, partner);
+export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions): string {
+  const view = yourView(t, library);
   return [
     `Write a review of ${what(t)} in my voice, as if I wrote it myself.`,
     view.length ? view.join('\n') : 'I have not noted anything yet: ask me three short questions about my reaction before writing anything.',
@@ -88,10 +91,10 @@ export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions, partn
   ].join('\n\n');
 }
 
-export function reflectPrompt(t: Title, library: Title[] = [], partner?: string): string {
+export function reflectPrompt(t: Title, library: Title[] = []): string {
   return [
     `I just watched ${what(t)}.`,
-    ...yourView(t, library, partner),
+    ...yourView(t, library),
     `Help me think about it more deeply: offer two or three distinct interpretations (including one I probably have not considered), the philosophical questions it raises, and where it sits among related works. Spoilers are fine. Challenge my reading where it seems thin. Keep it conversational and end with one question back to me.`,
   ].filter(Boolean).join('\n\n');
 }
@@ -104,5 +107,9 @@ export function recapPrompt(t: Title, last: Episode): string {
   ].join('\n\n');
 }
 
-export const claudeUrl = (prompt: string) => `https://claude.ai/new?q=${encodeURIComponent(prompt)}`;
-export const chatgptUrl = (prompt: string) => `https://chatgpt.com/?q=${encodeURIComponent(prompt)}`;
+/**
+ * A new, empty chat. The prompt goes by the clipboard, not in the address: an address with your notes in
+ * it is kept in browser history and server logs, long ones break, and some assistants send a prefilled
+ * prompt before you have read it.
+ */
+export const ASSISTANTS = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' } as const;

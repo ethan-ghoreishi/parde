@@ -119,9 +119,26 @@ test('want a film, record trailer keenness, log a watch with partner rating', as
   await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' })).toHaveAttribute('aria-pressed', 'true');
   await page.getByText('See the prompt').click();
   const prompt = page.locator('.assist pre');
-  await expect(prompt).toContainText('My rating: 6/10 (Sara: 9/10)');
+  await expect(prompt).toContainText('My rating: 6/10 (my partner: 9/10)');
+  await expect(prompt).not.toContainText('Sara'); // nobody else's name goes to an assistant
   await expect(prompt).toContainText('What it was about for me: memory');
   await expect(prompt).toContainText('Do not invent opinions');
+
+  // The assistant opens as an empty chat: the prompt travels by clipboard, never in the address.
+  await page.context().route(/claude\.ai/, (r) => r.fulfill({ body: '<title>claude</title>', contentType: 'text/html' }));
+  const [chat] = await Promise.all([page.waitForEvent('popup'), page.getByRole('button', { name: 'Open Claude ↗' }).click()]);
+  await chat.waitForLoadState();
+  expect(chat.url()).toBe('https://claude.ai/new');
+  await chat.close();
+
+  // Cancel in the log dialog really cancels, themes included.
+  await page.getByRole('button', { name: 'Log a rewatch' }).click();
+  const again = page.getByRole('dialog', { name: /Watched/ });
+  await again.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'grief' }).click();
+  await again.getByRole('button', { name: 'Cancel' }).click();
+  await expect(again).toBeHidden();
+  await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'grief' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('a series already part-watched is placed in one step, and Tonight resumes there', async ({ page }) => {
@@ -247,27 +264,49 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   await fresh.close();
 });
 
-test('layout: no horizontal scroll, the page itself never scrolls, the tab bar stays at the bottom', async ({ page, isMobile }) => {
+test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the bottom edge and never covers the end of a page', async ({ page, isMobile }) => {
   await search(page, 'severance');
-  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
+  const hit = page.locator('li.hit', { hasText: 'Severance' });
+  await hit.getByRole('button', { name: 'Watching' }).click();
+  // Navigating away while the series is still being saved would abort the save.
+  await expect(hit.getByText('Where are you up to?')).toBeVisible();
   await page.keyboard.press('Escape');
-  for (const p of ['./', './#/calendar', './#/library', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
+  // Short pages (an empty calendar day) and long ones (a series with its episode list)
+  for (const p of ['./', './#/calendar?d=2001-01-01', './#/library', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
     await page.goto(p);
     await page.waitForTimeout(150);
-    const m = await page.evaluate(() => {
-      const sc = document.getElementById('scroller')!;
-      return {
-        docX: document.documentElement.scrollWidth - innerWidth,
-        docY: document.documentElement.scrollHeight - innerHeight,
-        innerX: sc.scrollWidth - sc.clientWidth,
-        nav: Math.round(document.querySelector('nav.bottom')!.getBoundingClientRect().bottom) - innerHeight,
-      };
-    });
-    expect(m.docX, p).toBeLessThanOrEqual(0);
-    expect(m.innerX, p).toBeLessThanOrEqual(0);
-    // Safari moves its toolbar with document scrolling; a document that cannot scroll keeps the tab bar put.
-    expect(m.docY, p).toBeLessThanOrEqual(0);
-    if (isMobile) expect(m.nav, p).toBe(0);
+    const at = (where: 'top' | 'end') =>
+      page.evaluate((where) => {
+        if (where === 'end') scrollTo(0, document.documentElement.scrollHeight);
+        const nav = document.querySelector('nav.bottom')!.getBoundingClientRect();
+        const main = document.getElementById('main')!;
+        const last = [...main.querySelectorAll('*')].filter((el) => el.getClientRects().length).at(-1)!.getBoundingClientRect();
+        return {
+          docX: document.documentElement.scrollWidth - innerWidth,
+          navBottom: Math.round(nav.bottom) - innerHeight,
+          lastClear: Math.round(nav.top - last.bottom),
+          headerTop: Math.round(document.querySelector('header')!.getBoundingClientRect().top),
+        };
+      }, where);
+    const top = await at('top');
+    expect(top.docX, p).toBeLessThanOrEqual(0);
+    const end = await at('end');
+    expect(end.headerTop, p).toBe(0);
+    if (isMobile) {
+      expect(top.navBottom, p).toBe(0);
+      expect(end.navBottom, p).toBe(0);
+      expect(end.lastClear, `${p}: end of the page is above the tab bar`).toBeGreaterThanOrEqual(0);
+    }
+  }
+  if (isMobile) {
+    // A long page really scrolls the document (so iOS can collapse Safari's toolbar and status-bar taps scroll up).
+    await page.goto('./#/t/tvm%3A44933');
+    await page.getByRole('button', { name: /Season 1/ }).first().waitFor();
+    await page.evaluate(() => scrollBy(0, 600));
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(0);
+    // Changing page starts at the top.
+    await page.getByRole('link', { name: 'Library' }).last().click();
+    await expect.poll(() => page.evaluate(() => scrollY)).toBe(0);
   }
 });
 
@@ -276,4 +315,28 @@ test('when Wikimedia is busy, search says so instead of showing no films', async
   await search(page, 'severance');
   await expect(page.locator('li.hit', { hasText: 'Severance' })).toBeVisible();
   await expect(page.getByText(/Films and people unavailable just now/)).toBeVisible();
+});
+
+test.describe('offline', () => {
+  test.use({ serviceWorkers: 'allow' });
+  test('with no connection the installed app still opens with your collection', async ({ page, context, browserName }) => {
+    test.skip(browserName !== 'chromium', 'Playwright drives service workers reliably only in Chromium');
+    await search(page, 'dune');
+    await page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByRole('button', { name: 'Seen' }).click();
+    await expect(page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByText('Your rating')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+
+    await context.setOffline(true);
+    await page.goto('./#/library');
+    await page.reload(); // the page itself now comes from the service worker's cache
+    await expect(page.locator('.tile', { hasText: 'Dune: Part Two' })).toBeVisible();
+    await page.locator('.tile', { hasText: 'Dune: Part Two' }).click();
+    await expect(page.getByRole('heading', { name: 'Dune: Part Two' })).toBeVisible();
+    await page.getByRole('link', { name: 'Taste' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Your taste' })).toBeVisible();
+    await context.setOffline(false);
+  });
 });

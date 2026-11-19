@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { db, getSetting, setSetting, type Link } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, UNDO_KEY, type Backup } from '../lib/backup';
+  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, undoInfo, type Backup } from '../lib/backup';
   import { moveDomain, persistStorage } from '../lib/actions';
   import { hostOf } from '../lib/links';
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
@@ -14,11 +14,11 @@
       lastBackup: await getSetting<string>('lastBackupAt', ''),
       partner: await getSetting('partner', ''),
       sites: (await getSetting<Site[]>('sites', DEFAULT_SITES)).filter(validSite),
-      undoAt: (await getSetting<{ at?: string } | null>(UNDO_KEY, null))?.at ?? '',
+      undo: await undoInfo(),
       links: await db.links.toArray(),
       count: await db.titles.count(),
     }),
-    { lastBackup: '', partner: '', sites: DEFAULT_SITES, undoAt: '', links: [] as Link[], count: 0 },
+    { lastBackup: '', partner: '', sites: DEFAULT_SITES, undo: null as Awaited<ReturnType<typeof undoInfo>>, links: [] as Link[], count: 0 },
   );
 
   let persisted = $state<boolean | null>(null);
@@ -64,16 +64,21 @@
     if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? What is here now is kept aside so you can undo this straight afterwards.`)) return;
     try {
       await restore(pending.backup, mode);
-      toast(mode === 'merge' ? 'Backup merged in' : 'Restored from backup', 'ok', { label: 'Undo', run: undo });
+      toast(mode === 'merge' ? 'Backup merged in' : 'Restored from backup', 'ok', { label: 'Undo', run: () => undo(false) });
       pending = null;
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
     }
   }
 
-  async function undo() {
+  /** Undo (or redo) the last restore. Nothing is lost either way: the other side is kept to switch back to. */
+  async function undo(ask = true) {
+    const u = data.value.undo ?? (await undoInfo());
+    if (!u) return toast('Nothing to undo');
+    const what = u.kind === 'undo' ? 'the restored data' : 'what was here before the restore';
+    if (ask && !confirm(`Put back ${what} (from ${ago(u.at)})? Anything changed since then is kept aside too, so you can switch back afterwards.`)) return;
     try {
-      toast((await undoRestore()) ? 'Put back what was here before the restore' : 'Nothing to undo');
+      toast((await undoRestore()) ? `Put back ${what}` : 'Nothing to undo');
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
     }
@@ -143,8 +148,11 @@
       <p class="small muted">Merge keeps everything here and adds what is missing; where both have the same title, the more recently edited version wins. Either way you can undo it afterwards.</p>
     </div>
   {/if}
-  {#if data.value.undoAt && !pending}
-    <p class="small muted">Restored {ago(data.value.undoAt)}. <button class="small" onclick={undo}>Undo that restore</button></p>
+  {#if data.value.undo && !pending}
+    <p class="small muted">
+      {data.value.undo.kind === 'undo' ? `Undid a restore ${ago(data.value.undo.at)}.` : `Restored ${ago(data.value.undo.at)}.`}
+      <button class="small" onclick={() => undo()}>{data.value.undo.kind === 'undo' ? 'Redo the restore' : 'Undo that restore'}</button>
+    </p>
   {/if}
   {#if ios}
     <p class="small muted">On iPhone and iPad, tap Share → Add to Home Screen. Safari can clear data for websites you have not opened for a while; the installed app is kept.</p>

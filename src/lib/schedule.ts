@@ -41,27 +41,28 @@ export const byOrder = (a: Episode, b: Episode) => a.season - b.season || a.numb
 
 export const code = (e: Pick<Episode, 'season' | 'number'>) => `S${two(e.season)}E${two(e.number)}`;
 
-export function nextUnseen(episodes: Episode[], seen: Set<number>): Episode | undefined {
-  return [...episodes].sort(byOrder).find((e) => !seen.has(e.id));
-}
-
 export interface Progress {
+  /** The episode after the furthest one seen: where you are, even if you skipped something earlier */
   next?: Episode;
-  /** Aired episodes not yet seen */
+  /** Aired episodes from `next` on */
   unseenAired: number;
   seenCount: number;
   total: number;
   lastSeen?: Episode;
+  /** Unmarked episodes before the furthest one seen (skipped, or never ticked) */
+  skipped: number;
 }
 
 export function progress(episodes: Episode[], seen: Set<number>, now = new Date()): Progress {
   const sorted = [...episodes].sort(byOrder);
-  const seenEps = sorted.filter((e) => seen.has(e.id));
+  const last = sorted.findLastIndex((e) => seen.has(e.id));
+  const ahead = sorted.slice(last + 1);
   return {
-    next: sorted.find((e) => !seen.has(e.id)),
-    unseenAired: sorted.filter((e) => !seen.has(e.id) && isAired(e, now)).length,
-    seenCount: seenEps.length,
+    next: ahead[0],
+    unseenAired: ahead.filter((e) => isAired(e, now)).length,
+    seenCount: sorted.filter((e) => seen.has(e.id)).length,
     total: sorted.length,
-    lastSeen: seenEps.at(-1),
+    lastSeen: sorted[last],
+    skipped: last + 1 - sorted.slice(0, last + 1).filter((e) => seen.has(e.id)).length,
   };
 }

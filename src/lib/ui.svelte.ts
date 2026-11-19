@@ -5,6 +5,9 @@ export const ui = $state({
   searchQuery: '',
 });
 
+/** The time pages compute "today" and "out yet" from; App moves it on (and on return to the app). */
+export const clock = $state({ now: Date.now() });
+
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 export function toast(text: string, tone: 'ok' | 'error' = 'ok', action?: { label: string; run: () => void }) {
@@ -17,11 +20,11 @@ export function errorText(e: unknown) {
   return e instanceof Error ? e.message : 'Something went wrong.';
 }
 
-export async function copy(text: string) {
+export async function copy(text: string, done = 'Copied') {
   try {
     await navigator.clipboard.writeText(text);
-    toast('Copied');
+    toast(done);
   } catch {
-    toast('Could not copy. Long-press the link instead.', 'error');
+    toast('Could not copy. Select the text and copy it yourself.', 'error');
   }
 }

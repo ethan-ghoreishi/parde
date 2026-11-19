@@ -12,11 +12,13 @@
   let together = $state(true);
   let rating = $state<number | undefined>();
   let partnerRating = $state<number | undefined>();
+  let themes = $state<string[]>([]);
 
   $effect(() => {
     if (open && !dialog.open) {
       rating = title.rating;
       partnerRating = title.partnerRating;
+      themes = [...(title.themes ?? [])];
       date = dayKey(new Date());
       dialog.showModal();
     } else if (!open && dialog.open) dialog.close();
@@ -24,7 +26,8 @@
 
   async function save() {
     try {
-      await logWatch(title, { date, together, rating, partnerRating });
+      // Plain copies: Svelte's state proxies cannot be stored in IndexedDB.
+      await logWatch(title, { date, together, rating, partnerRating, themes: [...themes] });
       open = false;
       toast(`Logged ${title.name}`);
     } catch (e) {
@@ -56,7 +59,7 @@
     {/if}
     <div>
       <span class="label">What was it about for you? (optional)</span>
-      <Themes {title} compact />
+      <Themes {title} compact value={themes} onchange={(v) => (themes = v)} />
     </div>
     <div class="row">
       <button class="primary" type="submit">Save</button>

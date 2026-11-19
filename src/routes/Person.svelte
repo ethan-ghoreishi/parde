@@ -30,6 +30,16 @@
   const owned = (c: Credit) => lib.value.find((t) => t.id === `wd:${c.qid}` || t.qid === c.qid || (c.tvmaze && t.tvmaze === c.tvmaze));
   const roles = $derived([...new Set((work ?? []).flatMap((c) => c.roles))]);
   const shown = $derived((work ?? []).filter((c) => role === 'all' || c.roles.includes(role)));
+  // Long filmographies come in pages, and posters only for what is on screen: one request per 50.
+  let limit = $state(40);
+  const visible = $derived(shown.slice(0, limit));
+  const asked = new Set<string>();
+  $effect(() => {
+    const need = [info?.wiki, ...visible.map((c) => c.wiki)].filter((w): w is string => !!w && !asked.has(w));
+    if (!need.length) return;
+    for (const w of need) asked.add(w);
+    posters(need).then((p) => (pics = { ...pics, ...p }), () => {});
+  });
   const thisYear = new Date().getFullYear();
 
   onMount(async () => {
@@ -38,7 +48,7 @@
       if (!id) {
         const hit = await findPerson(givenName);
         if (!hit) {
-          error = `Could not find ${givenName} on Wikidata, so only what is in your library is shown.`;
+          error = `Wikidata has no one named exactly ${givenName}, so only what is in your library is shown.`;
           return;
         }
         id = hit.qid;
@@ -47,7 +57,6 @@
       info = i;
       // Announced (undated or future) first, then newest.
       work = c.sort((a, b) => (b.year ?? 9999) - (a.year ?? 9999) || a.name.localeCompare(b.name));
-      pics = await posters([i.wiki, ...c.map((x) => x.wiki)].filter((x): x is string => !!x)).catch(() => ({}));
     } catch (e) {
       error = errorText(e);
     }
@@ -106,8 +115,8 @@
       <h2>Filmography</h2>
       {#if roles.length > 1}
         <div class="row" role="group" aria-label="Role">
-          <button class="chip" class:on={role === 'all'} aria-pressed={role === 'all'} onclick={() => (role = 'all')}>All</button>
-          {#each roles as r}<button class="chip" class:on={role === r} aria-pressed={role === r} onclick={() => (role = r)}>{roleText[r]}</button>{/each}
+          <button class="chip" class:on={role === 'all'} aria-pressed={role === 'all'} onclick={() => ((role = 'all'), (limit = 40))}>All</button>
+          {#each roles as r}<button class="chip" class:on={role === r} aria-pressed={role === r} onclick={() => ((role = r), (limit = 40))}>{roleText[r]}</button>{/each}
         </div>
       {/if}
     </div>
@@ -119,7 +128,7 @@
       <p class="muted small">Wikidata lists no films or series for {name}.</p>
     {:else}
       <ul class="work">
-        {#each shown as c (c.qid)}
+        {#each visible as c (c.qid)}
           {@const own = owned(c)}
           <li>
             <Poster src={c.wiki ? pics[c.wiki] : undefined} name={c.name} size="xs" />
@@ -145,6 +154,9 @@
           </li>
         {/each}
       </ul>
+      {#if shown.length > limit}
+        <button class="small" onclick={() => (limit += 40)}>Show more ({shown.length - limit} left)</button>
+      {/if}
       <p class="small muted">From Wikidata, which can be incomplete, especially for television.</p>
     {/if}
   </section>

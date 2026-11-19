@@ -436,8 +436,11 @@ export async function personInfo(qid: string): Promise<PersonInfo> {
   return { qid, name: label(e) ?? qid, description: e.descriptions?.en?.value, wiki: e.sitelinks?.enwiki?.title };
 }
 
-/** The Wikidata person most likely meant by a name (TVmaze cast come without Wikidata ids). */
+/**
+ * The Wikidata person with exactly this name (TVmaze cast come without Wikidata ids). Someone with a
+ * merely similar name would show the wrong filmography, so no match means undefined.
+ */
 export async function findPerson(name: string): Promise<PersonHit | undefined> {
   const { people } = await wdSearch(name);
-  return people.find((p) => key(p.name) === key(name)) ?? people[0];
+  return people.find((p) => key(p.name) === key(name));
 }
