@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DECADES, KNOWN, insight, lookUp, offer, premise, remember, shelf, threadOf, threads } from '../../src/lib/discover';
+import { DECADES, KNOWN, SERIES, insight, lookUp, offer, premise, shelf, threadOf, threads } from '../../src/lib/discover';
 import { parseCritics, type Find } from '../../src/lib/api/wiki';
 import type { Title } from '../../src/lib/db';
 
@@ -53,6 +53,13 @@ describe('ways in', () => {
     expect(fetch).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
+  it('remembering starts with films and series both, best known first, each once', async () => {
+    const all = await lookUp(KNOWN.key);
+    const first = all.slice(0, 12);
+    expect(first.filter((f) => f.kind === 'show')).toHaveLength(3);
+    expect(all.filter((f) => f.kind === 'film')[0]).toBe(first[0]);
+    expect(await lookUp(SERIES.key)).toEqual(all.filter((f) => f.kind === 'show'));
+  });
 });
 
 describe('a person', () => {
@@ -87,12 +94,13 @@ describe('a shelf', () => {
     const first = shelf(all, [], new Set(), new Set(), 2026);
     const second = shelf(all, [], new Set(), new Set(first.map((f) => f.qid)), 2026);
     expect(second.some((f) => first.includes(f))).toBe(false);
-    expect(shelf([F(1), F(2)], [], new Set(), new Set(['QF1', 'QF2']), 2026)).toHaveLength(2);
+    expect(shelf([F(1), F(2)], [], new Set(), new Set(['QF1', 'QF2']), 2026)).toHaveLength(0);
+    const shown = new Set<string>();
+    for (let i = 0; i < 4; i++) shelf(all, [], new Set(), shown, 2026).forEach((f) => shown.add(f.qid));
+    expect(shown.size).toBe(40);
+    expect(shelf(all, [], new Set(), shown, 2026)).toEqual([]);
   });
-  it('remembers only the latest few hundred', () => {
-    expect(remember(['a', 'b'], ['c', 'a'])).toEqual(['c', 'a', 'b']);
-    expect(remember(Array.from({ length: 700 }, (_, i) => `${i}`), ['x'])).toHaveLength(600);
-  });
+
 });
 
 describe('what a rating just told you', () => {

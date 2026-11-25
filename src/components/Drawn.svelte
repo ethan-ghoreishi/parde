@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { update } from '../lib/actions';
+  import { changeDrawn } from '../lib/actions';
   import { REASONS } from '../lib/discover';
 
   let { id, value = [] }: { id: string; value?: string[] } = $props();
-  const toggle = (k: string) => update(id, { drawn: value.includes(k) ? value.filter((x) => x !== k) : [...value, k] });
+  import { toast, errorText } from '../lib/ui.svelte';
+  const toggle = (k: string) => changeDrawn(id, k).catch((e) => toast(errorText(e), 'error'));
 </script>
 
 <div class="row chips" role="group" aria-label="What drew you">

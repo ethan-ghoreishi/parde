@@ -1,18 +1,29 @@
 <script lang="ts">
   import type { CriticScore } from '../lib/db';
+  import { toast, errorText } from '../lib/ui.svelte';
   import { scoreText } from '../lib/taste';
 
   /**
    * What others thought, closed until you ask: it is your own reaction Parde learns from, so it only notes whether
    * these were open when you chose. Open from the start once there is nothing left to influence.
    */
-  let { critics, open = false, onsee }: { critics: CriticScore[]; open?: boolean; onsee?: () => void } = $props();
+  let { critics, open = false, onsee }: { critics: CriticScore[]; open?: boolean; onsee?: () => void | Promise<void> } = $props();
   let shown = $state(false);
+  async function reveal(e: MouseEvent) {
+    if (open || shown) return;
+    e.preventDefault();
+    try {
+      await onsee?.();
+      shown = true;
+    } catch (error) {
+      toast(`Could not record that you opened the scores. ${errorText(error)}`, 'error');
+    }
+  }
 </script>
 
 {#if critics.length}
-  <details open={open || shown} ontoggle={(e) => { if (e.currentTarget.open && !open && !shown) { shown = true; onsee?.(); } }}>
-    <summary>What others thought</summary>
+  <details open={open || shown} ontoggle={(e) => { if (!open) shown = e.currentTarget.open; }}>
+    <summary onclick={reveal}>What others thought</summary>
     <ul class="small">
       {#each critics as c (c.source)}
         <li>{scoreText(c)}{#if c.asOf}<span class="muted">, as of {c.asOf.slice(0, 4)}</span>{/if}</li>

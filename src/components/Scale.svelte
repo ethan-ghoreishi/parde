@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toast, errorText } from '../lib/ui.svelte';
   let {
     max,
     value,
@@ -6,7 +7,7 @@
     onpick,
     compact = false,
     name = 'Rating',
-  }: { max: number; value?: number; labels?: readonly string[]; onpick: (v: number | undefined) => void; compact?: boolean; name?: string } = $props();
+  }: { max: number; value?: number; labels?: readonly string[]; onpick: (v: number | undefined) => unknown; compact?: boolean; name?: string } = $props();
 </script>
 
 <div class="scale" class:words={!!labels && !compact} style="--n: {max}" role="group" aria-label={name}>
@@ -16,7 +17,10 @@
       class:on={value === n}
       aria-pressed={value === n}
       title={labels?.[n]}
-      onclick={() => onpick(value === n ? undefined : n)}
+      onclick={async () => {
+        try { await onpick(value === n ? undefined : n); }
+        catch (e) { toast(`Could not save. ${errorText(e)}`, 'error'); }
+      }}
     >{labels && !compact ? labels[n] : n}</button>
   {/each}
 </div>

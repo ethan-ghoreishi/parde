@@ -13,33 +13,47 @@
     () => {
       const id = titleId;
       return async () => ({
+        orders: (await db.titles.get(id))?.episodeOrders,
         eps: (await db.episodes.where('titleId').equals(id).toArray()).sort(byOrder),
         seen: new Set(await db.seen.where('titleId').equals(id).primaryKeys()),
       });
     },
-    { eps: [] as import('../lib/db').Episode[], seen: new Set<number>() },
+    { eps: [] as import('../lib/db').Episode[], seen: new Set<number>(), orders: undefined as number[] | undefined },
   );
 
   const seen = $derived(data.value.seen);
   const eps = $derived(data.value.eps.filter((e) => isListed(e, seen)));
   // Only what is out (or already marked) can be "where you are".
-  const choices = $derived(eps.filter((e) => isAired(e) || seen.has(e.id)));
+  const choices = $derived(eps.filter((e) => !e.missingSince && isAired(e)));
+  let saving = $state(false);
   const seasons = $derived([...new Set(choices.map((e) => e.season))]);
   /** The last seen episode, if everything before it is seen too; '' when marks have gaps. */
   const current = $derived.by(() => {
-    const last = eps.findLastIndex((e) => seen.has(e.id));
+    const last = choices.findLastIndex((e) => seen.has(e.id));
     if (last < 0) return 'none';
-    return eps.slice(0, last + 1).every((e) => seen.has(e.id)) ? String(eps[last].id) : '';
+    return choices.slice(0, last + 1).every((e) => seen.has(e.id)) ? String(choices[last].id) : '';
   });
-  const seasonDone = (s: number) => eps.filter((e) => e.season === s).every((e) => isAired(e) || seen.has(e.id));
+  const seasonDone = (s: number) => {
+    const inSeason = eps.filter((e) => e.season === s && !e.missingSince);
+    const order = data.value.orders?.[s - 1];
+    return (order === undefined ? eps.some((e) => e.season > s && !e.missingSince && isAired(e)) : inSeason.length === order) &&
+      inSeason.every((e, i) => e.number === i + 1 && isAired(e));
+  };
 
   async function pick(v: string) {
-    const ep = v === 'none' ? null : (eps.find((e) => String(e.id) === v) ?? null);
+    if (saving) return;
+    const ep = choices.find((e) => String(e.id) === v);
+    if (v !== 'none' && !ep) return;
+    saving = true;
     try {
-      const undo = await setProgress(titleId, ep);
-      undoable(ep ? `Seen up to ${code(ep)}` : 'Set to not started', undo);
+      const undo = await setProgress(titleId, ep ?? null);
+      undoable(ep ? `Seen up to ${code(ep)}` : 'Episode progress cleared', undo);
     } catch (e) {
       toast(`Not saved: ${errorText(e)}`, 'error');
+      const select = document.getElementById(`up-${uid}`) as HTMLSelectElement | null;
+      if (select) select.value = current;
+    } finally {
+      saving = false;
     }
   }
 </script>
@@ -47,7 +61,7 @@
 {#if choices.length}
   <div class="picker">
     <label for="up-{uid}">{label}</label>
-    <select id="up-{uid}" value={current} onchange={(e) => pick(e.currentTarget.value)}>
+    <select id="up-{uid}" value={current} disabled={saving} onchange={(e) => pick(e.currentTarget.value)}>
       {#if current === ''}<option value="" disabled>Some episodes skipped</option>{/if}
       <option value="none">Not started</option>
       {#each seasons as s (s)}
@@ -60,6 +74,10 @@
       {/each}
     </select>
   </div>
+{:else if data.ready}
+  <p class="small muted">No released episodes are available to mark yet.</p>
+{:else}
+  <p class="small muted" role="status">Loading episodes…</p>
 {/if}
 
 <style>

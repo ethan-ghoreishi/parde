@@ -8,6 +8,7 @@
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
   import { formatDay, ago } from '../lib/format';
   import { toast, errorText } from '../lib/ui.svelte';
+  import { forgetShelves } from './Discover.svelte';
 
   const data = live(
     () => async () => ({
@@ -56,15 +57,19 @@
     if (r.mode === 'replace') return `Replaced: ${n(r.added, 'title')}, ${n(r.marks, 'episode')} seen, ${n(r.links, 'source')}, ${n(r.watches, 'viewing')}.`;
     const parts = [
       r.added && `${n(r.added, 'title')} added`, r.updated && `${n(r.updated, 'title')} updated`, r.marks && `${n(r.marks, 'episode')} marked seen`,
-      r.links && `${n(r.links, 'source')} added`, r.watches && `${n(r.watches, 'viewing')} added`,
+      r.links && `${n(r.links, 'source')} added`, r.linkEdits && `${n(r.linkEdits, 'source')} updated`,
+      r.watches && `${n(r.watches, 'viewing')} added`, r.passes && `${n(r.passes, 'passed title')} added`,
     ].filter(Boolean);
-    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'thing')} you had removed here left out.` : ''}`;
+    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'thing')} you removed here since ${r.leftOut === 1 ? 'was' : 'were'} left out.` : ''}`;
   }
   let done = $state('');
 
   let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string; problems: string[] } | null>(null);
   let importError = $state('');
+  let reading = 0;
+  let restoring = $state(false);
   async function pick(e: Event) {
+    const read = ++reading;
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
     (e.currentTarget as HTMLInputElement).value = '';
     importError = '';
@@ -72,20 +77,29 @@
     pending = null;
     if (!file) return;
     if (file.size > 50 * 1024 * 1024) return (importError = 'That file is too large to be a Parde backup.');
-    const parsed = parseBackup(await file.text());
-    if (!parsed.ok) return (importError = parsed.error);
-    pending = { backup: parsed.backup, counts: parsed.counts, name: file.name, problems: parsed.problems };
+    try {
+      const parsed = parseBackup(await file.text());
+      if (read !== reading) return;
+      if (!parsed.ok) return (importError = parsed.error);
+      pending = { backup: parsed.backup, counts: parsed.counts, name: file.name, problems: parsed.problems };
+    } catch (e) {
+      if (read === reading) importError = errorText(e);
+    }
   }
 
   async function apply(mode: 'merge' | 'replace') {
-    if (!pending) return;
+    if (!pending || restoring) return;
     if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? What is here now is kept aside so you can undo this straight afterwards.`)) return;
+    restoring = true;
     try {
       done = summary(await restore(pending.backup, mode));
+      forgetShelves();
       pending = null;
       toast(mode === 'merge' ? 'Merged' : 'Restored', 'ok', { label: 'Undo', run: () => undo(false) });
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
+    } finally {
+      restoring = false;
     }
   }
 
@@ -97,6 +111,7 @@
     if (ask && !confirm(`Put back ${what} (from ${ago(u.at)})? Anything changed since then is kept aside too, so you can switch back afterwards.`)) return;
     try {
       toast((await undoRestore()) ? `Put back ${what}` : 'Nothing to undo');
+      forgetShelves();
       done = '';
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
@@ -160,23 +175,23 @@
     <div class="card preview stack" role="region" aria-label="Backup preview">
       <p class="small"><strong>{pending.name}</strong>{pending.backup.exportedAt ? `, made ${formatDay(pending.backup.exportedAt.slice(0, 10))}` : ''}: {pending.counts.titles} titles, {pending.counts.links} sources, {pending.counts.seen} episodes seen, {pending.counts.watches} viewings.</p>
       <div class="row">
-        <button class="primary" onclick={() => apply('merge')}>Merge into this browser</button>
+        <button class="primary" disabled={restoring} onclick={() => apply('merge')}>Merge into this browser</button>
         {#if !pending.problems.length}<button class="danger" onclick={() => apply('replace')}>Replace everything</button>{/if}
         <button class="ghost" onclick={() => (pending = null)}>Cancel</button>
       </div>
       {#if pending.problems.length}
         <div class="small" role="alert">
-          <p>{n(pending.problems.length, 'record')} in this file cannot be read and will be left out, so it can be merged but not used to replace everything:</p>
+          <p>{n(pending.problems.length, 'record')} in this file cannot be fully read. What cannot be read is left out, so the file can be merged but not used to replace everything:</p>
           <ul>{#each pending.problems.slice(0, 5) as p}<li>{p}</li>{/each}</ul>
           {#if pending.problems.length > 5}<p>…and {pending.problems.length - 5} more.</p>{/if}
         </div>
       {/if}
-      <p class="small muted">Merge keeps everything here and adds what is missing. Where both have a title, your latest edit of each thing (rating, note, status…) wins, and what you removed here stays removed. Either way you can undo it.</p>
+      <p class="small muted">Merge adds what is missing and keeps the newest edit of each thing. What you removed here stays removed, unless the file has a later change to it. Either way can be undone.</p>
     </div>
   {/if}
   {#if done}<p class="small" role="status">{done}</p>{/if}
   {#if unreadable.length}
-    <p class="small" role="alert">{n(unreadable.length, 'record')} here cannot be read back from a backup, for example {unreadable[0]}. Everything else is in the file.</p>
+    <p class="small" role="alert">{n(unreadable.length, 'record')} here cannot be fully read back from a backup, for example {unreadable[0]}. Everything else is in the file.</p>
   {/if}
   {#if data.value.undo && !pending}
     <p class="small muted">

@@ -6,7 +6,7 @@ export type Meta = Pick<
   Title,
   | 'kind' | 'name' | 'year' | 'poster' | 'overview' | 'genres' | 'runtime' | 'people' | 'subjects'
   | 'countries' | 'languages' | 'critics' | 'trailer' | 'qid' | 'imdb' | 'tvmaze' | 'wiki'
-  | 'network' | 'webChannel' | 'channelCountry' | 'showStatus' | 'tvmUpdated'
+  | 'network' | 'webChannel' | 'channelCountry' | 'showStatus' | 'endedOn' | 'episodeOrders' | 'tvmUpdated'
 >;
 
 export interface FilmHit {
@@ -165,9 +165,11 @@ const METHODS: Record<string, string> = {
 
 /** What a review score measures, or undefined if the statement does not say. */
 function sourceOf(by: string | undefined, method: string | undefined, value: string): string | undefined {
-  if (by === IMDB) return 'IMDb';
+  if (by === IMDB) return /\/\s*10$/.test(value) ? 'IMDb' : undefined;
   const s = method && METHODS[method];
-  if (s) return by === (s === 'Metacritic' ? METACRITIC : ROTTEN) ? s : undefined;
+  if (s === 'Metacritic') return by === METACRITIC && /\/\s*100$/.test(value) ? s : undefined;
+  if (s === 'Rotten Tomatoes average') return by === ROTTEN && /\/\s*10$/.test(value) ? s : undefined;
+  if (s) return by === ROTTEN && /%\s*$/.test(value) ? s : undefined;
   // Out of 100, Metacritic can only be the Metascore (its users rate out of 10). Rotten Tomatoes has three kinds of score: do not guess.
   return by === METACRITIC && !method && /\/\s*100$/.test(value) ? 'Metacritic' : undefined;
 }
@@ -361,9 +363,9 @@ export async function filmMeta(qid: string): Promise<Meta> {
 /** Find the Wikidata item for an IMDb id (used to enrich TVmaze shows). */
 export async function qidForImdb(imdb: string): Promise<string | undefined> {
   const res = await getJson<{ query?: { search: { title: string }[] } }>(
-    `${WD}?${qs({ action: 'query', format: 'json', origin: '*', list: 'search', srsearch: `haswbstatement:P345=${imdb}`, srlimit: 1 })}`,
+    `${WD}?${qs({ action: 'query', format: 'json', origin: '*', list: 'search', srsearch: `haswbstatement:P345=${imdb}`, srlimit: 2 })}`,
   );
-  return res.query?.search[0]?.title;
+  return res.query?.search.length === 1 ? res.query.search[0].title : undefined;
 }
 
 // ---------- People and their work ----------

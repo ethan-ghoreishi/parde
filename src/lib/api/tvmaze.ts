@@ -10,6 +10,7 @@ export interface TvmShow {
   genres: string[];
   status: string;
   premiered: string | null;
+  ended?: string | null;
   averageRuntime: number | null;
   runtime: number | null;
   rating: { average: number | null };
@@ -21,6 +22,7 @@ export interface TvmShow {
   updated: number;
   _embedded?: {
     episodes?: TvmEpisode[];
+    seasons?: { number: number; episodeOrder: number | null }[];
     cast?: { person: { name: string } }[];
     crew?: { type: string; person: { name: string } }[];
   };
@@ -70,11 +72,12 @@ export async function showForImdb(imdb: string): Promise<number | undefined> {
   }
 }
 
-/** Best TVmaze match for a series known only by name (and maybe year): exact name, then year. */
+/** Use a unique exact name and, when supplied, exact premiere year. */
 export async function findShow(name: string, year?: number): Promise<number | undefined> {
   const hits = await searchShows(year ? `${name} ${year}` : name);
   const k = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  return hits.find((h) => k(h.name) === k(name) && (!year || !h.year || Math.abs(h.year - year) <= 1))?.tvmaze;
+  const exact = hits.filter((h) => k(h.name) === k(name) && (!year || h.year === year));
+  return exact.length === 1 ? exact[0].tvmaze : undefined;
 }
 
 export function toEpisode(titleId: string, e: TvmEpisode): Episode | null {
@@ -100,6 +103,10 @@ export function showToMeta(s: TvmShow): Meta {
     ...crew.filter((c) => c.type === 'Creator' || c.type === 'Developer').map((c) => ({ name: c.person.name, role: 'creator' as const })),
     ...(s._embedded?.cast ?? []).slice(0, 10).map((c) => ({ name: c.person.name, role: 'cast' as const })),
   ];
+  // Season numbers can skip (Money Heist has no 2): a season that does not exist has none. By-year seasons are left out.
+  const seasons = s._embedded?.seasons?.filter((x) => x.number > 0);
+  const episodeOrders = seasons?.length && seasons.every((x) => x.number < 100 && Number.isInteger(x.episodeOrder) && x.episodeOrder! > 0)
+    ? Array.from({ length: Math.max(...seasons.map((x) => x.number)) }, (_, i) => seasons.find((x) => x.number === i + 1)?.episodeOrder ?? 0) : undefined;
   return {
     kind: 'show',
     name: s.name,
@@ -120,13 +127,16 @@ export function showToMeta(s: TvmShow): Meta {
     // The channel whose dates we show (see schedule.release): a network, else the streaming service.
     channelCountry: (s.network ?? s.webChannel)?.country?.code ?? undefined,
     showStatus: s.status,
+    endedOn: s.ended ?? undefined,
+    episodeOrders,
     tvmUpdated: s.updated,
   };
 }
 
 export async function fetchShow(id: number): Promise<{ meta: Meta; episodes: TvmEpisode[] }> {
-  const s = await getJson<TvmShow>(`${API}/shows/${id}?embed[]=episodes&embed[]=cast&embed[]=crew`);
-  return { meta: showToMeta(s), episodes: s._embedded?.episodes ?? [] };
+  const s = await getJson<TvmShow>(`${API}/shows/${id}?embed[]=episodes&embed[]=cast&embed[]=crew&embed[]=seasons`);
+  if (s.id !== id || !Array.isArray(s._embedded?.episodes)) throw new Error('TVmaze returned an incomplete series schedule. Try again.');
+  return { meta: showToMeta(s), episodes: s._embedded.episodes };
 }
 
 /** Map of show id → last-updated stamp, for shows changed in the last day, week or month. */

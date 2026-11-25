@@ -5,7 +5,7 @@
   import { titleHref } from '../lib/router.svelte';
   import { credits, personInfo, findPerson, posters, type Credit, type CreditRole, type PersonInfo } from '../lib/api/wiki';
   import { findShow } from '../lib/api/tvmaze';
-  import { addFilm, addShow, update, seenAllAired } from '../lib/actions';
+  import { addFilm, addShow, update } from '../lib/actions';
   import { toast, errorText } from '../lib/ui.svelte';
   import { mean } from '../lib/taste';
   import Poster from '../components/Poster.svelte';
@@ -71,10 +71,9 @@
       else {
         const tvm = c.tvmaze ?? (await findShow(c.name, c.year));
         if (!tvm) throw new Error(`${c.name} is not on TVmaze, so Parde cannot track its episodes.`);
-        id = await addShow(tvm);
+        id = await addShow(tvm, { qid: c.qid, status: status === 'watched' ? 'watching' : status }, status === 'watched' ? 'all' : undefined);
       }
       if (status === 'watched') {
-        if (c.kind === 'show') await seenAllAired(id);
         justSeen[c.qid] = id;
       } else toast(`${c.name} added to your list`);
     } catch (e) {

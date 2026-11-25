@@ -3,8 +3,8 @@
   import { live } from '../lib/live.svelte';
   import { titleHref, personHref } from '../lib/router.svelte';
   import {
-    trailerInstinct, versusCritics, makerAffinity, castAffinity, genreAffinity, themeAffinity, contradictions, scoreBands, compare, drawnOutcomes,
-    partnerSplits, counts, decade, rated, mean, reliable, type Affinity, type Gap, type Tally,
+    trailerInstinct, versusCritics, makerAffinity, castAffinity, genreAffinity, themeAffinity, contradictions, scoreBands, scoreRules, compare, drawnOutcomes,
+    partnerSplits, counts, decade, rated, mean, reliable, type Affinity, type Gap, type ScoreRule, type Tally,
   } from '../lib/taste';
   import { formatDay } from '../lib/format';
   import DiscoverTabs from '../components/DiscoverTabs.svelte';
@@ -21,6 +21,7 @@
   const instinct = $derived(trailerInstinct(titles));
   const critics = $derived(versusCritics(titles));
   const bands = $derived(scoreBands(titles, data.value.dismissed));
+  const rules = $derived(scoreRules(titles, data.value.dismissed));
   const drawn = $derived(drawnOutcomes(titles).filter((d) => d.n >= 2));
   const makers = $derived(makerAffinity(titles));
   const actors = $derived(castAffinity(titles, 3).filter((a) => a.lift > 0.4).slice(0, 6));
@@ -39,11 +40,10 @@
   const above = $derived(genresA.filter((g) => g.lift > 0.3).slice(0, 6));
   const below = $derived(genresA.filter((g) => g.lift < -0.3).slice(-6).reverse());
 
-  /** Words for how sure a pattern is: it is only ever as strong as the number of titles behind it. */
-  const strength = (n: number) => (n >= 8 ? 'consistent' : n >= 4 ? 'a pattern' : 'an early sign');
+  /** A few titles are a clue, however neat they look. */
+  const early = (n: number) => (n < 4 ? ', an early sign' : '');
   // A coefficient is described only when it is more than chance for this many titles.
-  const describeR = (x: number, n: number) =>
-    !reliable(x, n) ? 'shows no reliable link yet with' : x >= 0.5 ? 'clearly tracks' : x > 0 ? 'loosely tracks' : 'runs against';
+  const describeR = (x: number, n: number) => (!reliable(x, n) ? 'has no clear link yet with' : x > 0 ? 'goes with' : 'runs against');
   const ratedN = $derived(r.length);
   const withMakers = $derived(r.filter((t) => t.people.some((p) => p.role !== 'cast' && p.role !== 'composer')).length);
   const likedIds = $derived(new Set(liked.map((m) => m.qid ?? m.key)));
@@ -53,19 +53,28 @@
   // ----- Scores and you -----
   const sourceName: Record<string, string> = { Metacritic: 'Metacritic', 'Rotten Tomatoes': 'the Tomatometer', 'Rotten Tomatoes average': 'the critics’ average on Rotten Tomatoes' };
   const chosen = $derived(bands.reduce((n, b) => n + b.blind.n + b.aware.n, 0));
-  // The top band against the lowest one with enough in it to compare.
-  const other = $derived(bands[2].ratings.length >= 5 ? bands[2] : bands[1]);
-  const enjoy = $derived(compare(bands[0].ratings, other.ratings));
-  const low = $derived(bands[2].ratings.length);
   const of = (t: Tally) => (t.n ? `${t.yes} of ${t.n}` : '–');
   const inBand = $derived(bands.reduce((n, b) => n + b.ratings.length, 0));
   const showBands = $derived(inBand >= 5 || chosen >= 4);
+  // The top band against the lowest one with enough in it to compare.
+  const other = $derived(bands[2].ratings.length >= 5 ? bands[2] : bands[1]);
+  const enjoy = $derived(compare(bands[0].ratings, other.ratings));
+  const tested = $derived(rules.filter((r) => r.fit.length || r.knowing.n));
+  const untested = $derived(rules.filter((r) => !tested.includes(r)));
+  const showScores = $derived(showBands || tested.length > 0 || critics.n >= 8);
+  const VERDICT = { few: 'too few to tell', unclear: 'no clear difference', higher: 'higher, by more than chance', lower: 'lower, by more than chance' } as const;
+  const outcome = (r: ScoreRule) => {
+    const n = r.fit.length;
+    if (!n) return 'None rated yet.';
+    const avgs = `${n} rated, ${mean(r.fit.map((t) => t.rating!)).toFixed(1)} on average`;
+    return r.rest.length ? `${avgs}; ${mean(r.rest).toFixed(1)} for the other ${r.rest.length} with those scores: ${VERDICT[compare(r.fit.map((t) => t.rating!), r.rest)]}.` : `${avgs}. Nothing to compare with yet.`;
+  };
 
   // What would unlock more, said once rather than as a wall of locked cards.
   const pending = $derived(
     [
-      instinct.n < 4 && `trailer instinct, after ${4 - instinct.n} more title${4 - instinct.n > 1 ? 's' : ''} with a “how keen” from before watching and a rating`,
-      !showBands && 'how scores sway you, as you rate films and choose in Discover',
+      instinct.n < 4 && `trailer instinct, after ${4 - instinct.n} more title${4 - instinct.n > 1 ? 's' : ''} with a “how keen” from before watching and a rating${instinct.uncounted ? ` (${instinct.uncounted} cannot be shown to come first)` : ''}`,
+      !showScores && 'how scores sway you, as you rate films and choose in Discover',
       !makers.length && 'people you trust, once you rate two titles by the same director or writer',
       !themesA.length && 'recurring themes, once three rated titles share one',
     ].filter((x): x is string => !!x),
@@ -86,7 +95,7 @@
     {#each items as a (a.qid ?? a.key)}
       <li>
         <details>
-          <summary><strong>{a.key}</strong> <span class="muted">{a.avg.toFixed(1)} over {a.n}{a.n < 4 ? ', an early sign' : ''}</span></summary>
+          <summary><strong>{a.key}</strong> <span class="muted">{a.avg.toFixed(1)} over {a.n}{early(a.n)}</span></summary>
           <p>{#each a.of.slice(0, 8) as t, i (t.id)}<a href={titleHref(t.id)}>{t.name}</a> {t.rating}{i < Math.min(a.of.length, 8) - 1 ? ', ' : ''}{/each}{a.of.length > 8 ? '…' : ''}</p>
           {#if people}
             <p class="row">{#if a.qid}<a class="chip" href="#/discover?{new URLSearchParams({ from: `person:${a.qid}`, name: a.key })}">Explore their work</a>{/if}<a class="chip" href={personHref(a.qid, a.key)}>Filmography</a></p>
@@ -100,7 +109,9 @@
 <DiscoverTabs current="taste" />
 <h1>Your taste</h1>
 
-{#if data.ready && !titles.length}
+{#if !data.ready}
+  <p role="status" class="small muted">Loading your library…</p>
+{:else if !titles.length && !data.value.dismissed.length}
   <div class="empty">
     <p>What you rate and choose in Discover shows up here as patterns, each with the titles behind it.</p>
     <a class="btn primary" href="#/discover">Start with what you have seen</a>
@@ -113,7 +124,7 @@
     <div class="card"><strong>{Number.isNaN(avg) ? '–' : avg.toFixed(1)}</strong><span class="small muted">average of {r.length} rating{r.length === 1 ? '' : 's'}</span></div>
   </div>
 
-  <p class="small muted lead">Open any pattern to see the titles behind it. A few titles are an early sign, not a conclusion, and you mostly rate what you chose to watch, so things you avoid are barely represented.</p>
+  <p class="small muted lead">Open any pattern to see the titles behind it. Small samples are early clues. Your ratings mostly cover things you chose to watch.</p>
 
   <div class="cards">
     {#if liked.length || notYours.length}
@@ -123,37 +134,52 @@
         {#if queued.length}
           <p class="small note">Already on your list by them: {#each queued as t, i}<a href={titleHref(t.id)}>{t.name}</a>{i < queued.length - 1 ? ', ' : ''}{/each}.</p>
         {/if}
-        {#if notYours.length}<h3>Not really your people</h3>{@render affList(notYours, true)}{/if}
+        {#if notYours.length}<h3>Below your average</h3>{@render affList(notYours, true)}{/if}
         {#if withMakers < ratedN}<p class="small muted">From {withMakers} of your {ratedN} rated titles; the rest have no director or writer listed.</p>{/if}
       </section>
     {/if}
 
-    {#if showBands}
-      <section class="card">
+    {#if showScores}
+      <section class="card score-card">
         <h2>Scores and you</h2>
-        <div class="scroll">
-          <table class="small">
-            <caption class="sr-only">By Tomatometer: how you rated, and how often you said yes in Discover before and after opening the scores</caption>
-            <thead><tr><th scope="col">Critics positive</th><th scope="col">You rated</th><th scope="col">Said yes unseen</th><th scope="col">Said yes knowing</th></tr></thead>
-            <tbody>
-              {#each bands as b (b.label)}
-                <tr><th scope="row">{b.label}</th><td>{b.ratings.length ? `${mean(b.ratings).toFixed(1)} (${b.ratings.length})` : '–'}</td><td>{of(b.blind)}</td><td>{of(b.aware)}</td></tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        <p class="small">
-          {#if enjoy === 'few'}Too few rated so far to compare.
-          {:else if enjoy === 'unclear'}No reliable difference yet between how you rate 80% or more and {other.label}.
-          {:else}Among what you chose to watch, you rate 80% or more {enjoy === 'higher' ? 'higher' : 'lower'} than {other.label}, by more than chance.{/if}
-          {#if low < 5}You have rated {low || 'none'} under 60%: too few to say whether a low score would steer you right.{/if}
-        </p>
-        {#if critics.n >= 5}
-          <p class="small">Your order {describeR(critics.r, critics.n)} {sourceName[critics.source]} ({critics.n} of your {ratedN} rated titles have it).</p>
+        {#if showBands}
+          <div class="scroll">
+            <table class="small">
+              <caption class="sr-only">By Tomatometer: how you rated, and how often you saved a title in Discover before and after opening its scores</caption>
+              <thead><tr><th scope="col">Tomatometer</th><th scope="col">You rated</th><th scope="col">Saved, scores closed</th><th scope="col">Saved, scores open</th></tr></thead>
+              <tbody>
+                {#each bands as b (b.label)}
+                  <tr><th scope="row">{b.label}</th><td>{b.ratings.length ? `${mean(b.ratings).toFixed(1)} (${b.ratings.length})` : '–'}</td><td>{of(b.blind)}</td><td>{of(b.aware)}</td></tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <p class="small">
+            {#if enjoy === 'few'}Too few rated so far to compare.
+            {:else if enjoy === 'unclear'}No clear difference yet between how you rate 80% or more and {other.label}.
+            {:else}Among what you chose to watch, you rate 80% or more {enjoy} than {other.label}, by more than chance.{/if}
+            {#if bands[2].ratings.length < 5}You have rated {bands[2].ratings.length || 'none'} under 60%: too few to say whether a low score steers you right.{/if}
+          </p>
         {/if}
-        {#if critics.n >= 8 && critics.warmer.length}<h3>You place higher than critics do</h3>{@render gapList(critics.warmer)}{/if}
-        {#if critics.n >= 8 && critics.colder.length}<h3>Critics place higher than you do</h3>{@render gapList(critics.colder)}{/if}
-        <p class="small muted">“Unseen” means before you opened the scores in Discover. Audience scores have no open source for most titles, so ideas about critics and audiences disagreeing can only be tested by what drew you.</p>
+        {#if critics.n >= 8}<p class="small">Your order {describeR(critics.r, critics.n)} {sourceName[critics.source]} ({critics.n} of your {ratedN} rated titles have it).</p>{/if}
+        {#if critics.n >= 8 && critics.warmer.length}<h3>You place higher than {sourceName[critics.source]} does</h3>{@render gapList(critics.warmer)}{/if}
+        {#if critics.n >= 8 && critics.colder.length}<h3>You place lower</h3>{@render gapList(critics.colder)}{/if}
+        {#if tested.length}
+          <h3>Your rules of thumb</h3>
+          <ul class="gaps small">
+            {#each tested as r (r.label)}
+              <li>
+                <strong>{r.label}.</strong> {outcome(r)}{#if r.knowing.n}{' '}With the scores open you saved {of(r.knowing)}.{/if}
+                {#if r.fit.length}<span class="muted">{#each r.fit.slice(0, 5) as t, i (t.id)}{i ? ', ' : ''}<a href={titleHref(t.id)}>{t.name}</a>{/each}{r.fit.length > 5 ? '…' : ''}</span>{/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <p class="small muted foot">
+          Scores are as Wikidata last recorded them, and never order what Parde suggests.
+          {#if untested.some((r) => r.audience)}Hunches about critics and audiences disagreeing cannot be tested here: free sources hardly ever publish audience scores.{/if}
+          {#if untested.some((r) => !r.audience)}Nothing to test yet: {untested.filter((r) => !r.audience).map((r) => r.label).join('; ')}.{/if}
+        </p>
       </section>
     {/if}
 
@@ -162,7 +188,7 @@
         <h2>What draws you in</h2>
         <ul class="gaps small">
           {#each drawn as d (d.why)}
-            <li><strong>{d.why}</strong> <span class="muted">{d.n} chosen{d.ratings.length ? `, ${d.ratings.length} watched: ${mean(d.ratings).toFixed(1)} on average` : ', none rated yet'}{d.ratings.length && d.ratings.length < 4 ? ', an early sign' : ''}</span></li>
+            <li><strong>{d.why}</strong> <span class="muted">{d.n} chosen{d.ratings.length ? `, ${d.ratings.length} rated: ${mean(d.ratings).toFixed(1)} on average` : ', none rated yet'}{d.ratings.length ? early(d.ratings.length) : ''}</span></li>
           {/each}
         </ul>
         <p class="small muted">Against {Number.isNaN(avg) ? 'your average' : `${avg.toFixed(1)} overall`}. From the reasons you tapped before watching.</p>
@@ -177,13 +203,13 @@
           {#if instinct.unsure.n}Of the <strong>{instinct.unsure.n}</strong> you doubted, <strong>{instinct.unsure.above}</strong> did.{/if}
         </p>
         {#if instinct.n >= 12}
-          <p class="small">Across {instinct.n} titles your trailer read {describeR(instinct.r, instinct.n)} how much you enjoy things (rank correlation {instinct.r.toFixed(2)}).</p>
+          <p class="small">Across {instinct.n} titles, how keen you were {describeR(instinct.r, instinct.n)} how much you enjoyed them.</p>
         {:else}
-          <p class="small muted">{instinct.n} titles so far: {strength(instinct.n)}. A firmer read comes at 12.</p>
+          <p class="small muted">{instinct.n} titles so far. A firmer read comes at 12.</p>
         {/if}
-        <p class="small muted">{instinct.blind} said before opening the scores, {instinct.aware} after{instinct.n - instinct.blind - instinct.aware ? `, ${instinct.n - instinct.blind - instinct.aware} from before Parde kept track` : ''}.</p>
-        {#if instinct.surprises.length}<h3>Better than the trailer</h3>{@render gapList(instinct.surprises)}{/if}
-        {#if instinct.letdowns.length}<h3>The trailer oversold it</h3>{@render gapList(instinct.letdowns)}{/if}
+        <p class="small muted">{instinct.blind} said before opening the scores, {instinct.aware} after{instinct.n - instinct.blind - instinct.aware ? `, ${instinct.n - instinct.blind - instinct.aware} from before Parde kept track` : ''}.{#if instinct.uncounted}{' '}{instinct.uncounted} more left out: nothing shows you said it before watching.{/if}</p>
+        {#if instinct.surprises.length}<h3>Low expectations, above your average</h3>{@render gapList(instinct.surprises)}{/if}
+        {#if instinct.letdowns.length}<h3>High expectations, below your average</h3>{@render gapList(instinct.letdowns)}{/if}
       </section>
     {/if}
 
@@ -198,7 +224,7 @@
           {/each}
         </div>
         {#each themesA.filter((a) => Math.abs(a.lift) >= 0.4).slice(0, 3) as a}
-          <p class="small note">Titles about <strong>{a.key}</strong> {a.lift > 0 ? 'move you more than most' : 'land less well with you'}: {a.avg.toFixed(1)} over {a.n} ({strength(a.n)}). <a href="#/discover?{new URLSearchParams({ from: `about:${a.key}` })}">Find others</a></p>
+          <p class="small note">Titles about <strong>{a.key}</strong> {a.lift > 0 ? 'move you more than most' : 'land less well with you'}: {a.avg.toFixed(1)} over {a.n}{early(a.n)}. <a href="#/discover?{new URLSearchParams({ from: `about:${a.key}` })}">Find others</a></p>
         {/each}
       </section>
     {/if}
@@ -283,6 +309,9 @@
   details[open] summary::before { content: '▾'; }
   .aff p { margin: 0.1rem 0 0.5rem 1rem; }
   .scroll { overflow-x: auto; margin-bottom: 0.75rem; }
+  .score-card { grid-column: 1 / -1; }
+  .score-card li .muted { display: block; }
+  .foot { margin: 0.9rem 0 0; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 0.4rem 0.6rem 0.4rem 0; border-bottom: 1px solid var(--line); font-weight: 400; vertical-align: bottom; }
   thead th { color: var(--muted); }

@@ -86,7 +86,7 @@
     const r = release(t);
     return r.where ? `${r.where}${t.channelCountry ? ` (${t.channelCountry})` : ''}` : '';
   };
-  const sourceFor = (e: Episode) => resolveLinks(data.value.links.filter((l) => l.titleId === e.titleId), e.season, e.number).find((r) => !r.link.broken);
+  const sourceFor = (e: Episode) => resolveLinks(data.value.links.filter((l) => l.titleId === e.titleId), e.season, e.number).find((r) => !r.broken);
 
   const shift = (days: number) => {
     const d = new Date(`${selected}T12:00:00`);
@@ -109,7 +109,7 @@
 
   async function open(e: Episode) {
     const src = sourceFor(e);
-    if (src && openExternal(src.url)) await editLink(src.link.id, { usedAt: now() });
+    if (src && openExternal(src.url)) await editLink(src.link.id, { usedAt: now() }).catch((e) => toast(errorText(e), 'error'));
     else toast('That saved link is not valid. Edit it under Sources.', 'error');
   }
 
