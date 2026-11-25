@@ -11,6 +11,8 @@
   --curtain: #b5383a;
   --ok: #86c08e;
   --danger: #ef8a6f;
+  --danger-ink: #1a0d08;
+  --field: #857a70;
   --radius: 12px;
   --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
   --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -31,6 +33,8 @@
     --curtain: #9e2a2b;
     --ok: #2f7a3b;
     --danger: #b3412a;
+    --danger-ink: #ffffff;
+    --field: #8c7f72;
   }
 }
 
@@ -92,9 +96,14 @@ button:disabled { opacity: 0.5; cursor: default; }
 button.primary, .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 button.ghost { background: transparent; border-color: transparent; }
 button.ghost:hover { background: var(--surface-2); }
-button.small { min-height: 32px; padding: 0.25rem 0.7rem; font-size: 0.85rem; }
+button.small, .btn.small { min-height: 36px; padding: 0.25rem 0.75rem; font-size: 0.87rem; }
 button.danger { color: var(--danger); }
-button.icon { width: 40px; padding: 0; }
+button.icon, .btn.icon { width: 40px; padding: 0; }
+/* Fingers need more room than a mouse. */
+@media (pointer: coarse) {
+  button, .btn { min-height: 44px; }
+  button.small, .btn.small, button.chip, a.chip { min-height: 40px; }
+}
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -103,9 +112,20 @@ input[type='text'], input[type='url'], input[type='search'], input[type='date'],
   min-height: 42px;
   padding: 0.5rem 0.75rem;
   border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--surface);
+  border: 1px solid var(--field);
+  background-color: var(--surface);
 }
+/* Native selects ignore min-height in Safari: draw our own arrow so they match the other fields. */
+select {
+  appearance: none;
+  padding-right: 2rem;
+  text-overflow: ellipsis;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(-45deg, transparent 50%, var(--muted) 50%);
+  background-position: right 1.05rem center, right 0.75rem center;
+  background-size: 0.32rem 0.32rem;
+  background-repeat: no-repeat;
+}
+::placeholder { color: var(--muted); opacity: 1; }
 textarea { min-height: 110px; resize: vertical; line-height: 1.5; }
 label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.25rem; }
 
@@ -135,7 +155,9 @@ label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0
   white-space: nowrap;
 }
 .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-button.chip { min-height: 32px; font-size: 0.85rem; }
+button.chip, a.chip { min-height: 36px; font-size: 0.87rem; text-decoration: none; }
+button.chip { padding: 0.15rem 0.8rem; }
+
 .chip.stream { border-color: var(--ok); color: var(--ok); }
 .chip.broadcast { border-color: var(--accent); color: var(--accent); }
 
@@ -176,8 +198,11 @@ dialog::backdrop { background: rgb(0 0 0 / 0.6); }
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
-.scale { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-.scale button { min-width: 40px; padding: 0 0.5rem; }
+/* One row, even ten across on a phone. */
+.scale { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 0.25rem; max-width: calc(var(--n) * 3rem); }
+.scale.words { display: flex; flex-wrap: wrap; max-width: none; }
+.scale button { min-width: 0; padding: 0; border-radius: 10px; }
+.scale.words button { padding: 0 0.8rem; border-radius: 999px; }
 .scale button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
 
 @media (prefers-reduced-motion: no-preference) {

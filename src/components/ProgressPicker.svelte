@@ -1,9 +1,9 @@
 <script lang="ts">
   import { db } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { byOrder, code, isAired } from '../lib/schedule';
+  import { byOrder, code, isAired, isListed } from '../lib/schedule';
   import { setProgress } from '../lib/actions';
-  import { toast, errorText } from '../lib/ui.svelte';
+  import { toast, undoable, errorText } from '../lib/ui.svelte';
 
   /** One choice records where you are in a series: everything up to it seen, nothing after. */
   let { titleId, label = 'Seen up to' }: { titleId: string; label?: string } = $props();
@@ -20,8 +20,8 @@
     { eps: [] as import('../lib/db').Episode[], seen: new Set<number>() },
   );
 
-  const eps = $derived(data.value.eps);
   const seen = $derived(data.value.seen);
+  const eps = $derived(data.value.eps.filter((e) => isListed(e, seen)));
   // Only what is out (or already marked) can be "where you are".
   const choices = $derived(eps.filter((e) => isAired(e) || seen.has(e.id)));
   const seasons = $derived([...new Set(choices.map((e) => e.season))]);
@@ -37,9 +37,9 @@
     const ep = v === 'none' ? null : (eps.find((e) => String(e.id) === v) ?? null);
     try {
       const undo = await setProgress(titleId, ep);
-      toast(ep ? `Seen up to ${code(ep)}` : 'Set to not started', 'ok', { label: 'Undo', run: undo });
+      undoable(ep ? `Seen up to ${code(ep)}` : 'Set to not started', undo);
     } catch (e) {
-      toast(errorText(e), 'error');
+      toast(`Not saved: ${errorText(e)}`, 'error');
     }
   }
 </script>

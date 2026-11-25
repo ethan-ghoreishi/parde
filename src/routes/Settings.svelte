@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { db, getSetting, setSetting, type Link } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, undoInfo, type Backup } from '../lib/backup';
+  import { buildBackup, saveBackup, shareBackup, parseBackup, restore, undoRestore, undoInfo, type Backup, type Restored } from '../lib/backup';
   import { moveDomain, persistStorage } from '../lib/actions';
   import { hostOf } from '../lib/links';
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
@@ -29,6 +29,10 @@
   async function exportNow() {
     try {
       const b = await buildBackup();
+      // Read it back first: a backup that could not be restored is worse than none.
+      const check = parseBackup(JSON.stringify(b));
+      if (!check.ok) throw new Error(`Parde could not make a backup it can read back. ${check.error}`);
+      unreadable = check.problems;
       const r = await saveBackup(b);
       if (r === 'cancelled') return toast('Backup not saved', 'error');
       // Safari can refuse a share that did not start straight from a tap: offer one.
@@ -42,30 +46,44 @@
   async function saved(b: Backup) {
     await setSetting('lastBackupAt', b.exportedAt);
     persistStorage();
-    toast('Backup saved. Keep it somewhere safe (iCloud Drive, NAS…).');
+    // Parde hands the file over; where it ends up is between you and the browser.
+    toast('Backup handed over. Check the file is where you want it.');
   }
 
-  let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string } | null>(null);
+  let unreadable = $state<string[]>([]);
+  const n = (x: number, one: string, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
+  function summary(r: Restored): string {
+    if (r.mode === 'replace') return `Replaced: ${n(r.added, 'title')}, ${n(r.marks, 'episode')} seen, ${n(r.links, 'source')}, ${n(r.watches, 'viewing')}.`;
+    const parts = [
+      r.added && `${n(r.added, 'title')} added`, r.updated && `${n(r.updated, 'title')} updated`, r.marks && `${n(r.marks, 'episode')} marked seen`,
+      r.links && `${n(r.links, 'source')} added`, r.watches && `${n(r.watches, 'viewing')} added`,
+    ].filter(Boolean);
+    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'thing')} you had removed here left out.` : ''}`;
+  }
+  let done = $state('');
+
+  let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string; problems: string[] } | null>(null);
   let importError = $state('');
   async function pick(e: Event) {
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
     (e.currentTarget as HTMLInputElement).value = '';
     importError = '';
+    done = '';
     pending = null;
     if (!file) return;
     if (file.size > 50 * 1024 * 1024) return (importError = 'That file is too large to be a Parde backup.');
     const parsed = parseBackup(await file.text());
     if (!parsed.ok) return (importError = parsed.error);
-    pending = { backup: parsed.backup, counts: parsed.counts, name: file.name };
+    pending = { backup: parsed.backup, counts: parsed.counts, name: file.name, problems: parsed.problems };
   }
 
   async function apply(mode: 'merge' | 'replace') {
     if (!pending) return;
     if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? What is here now is kept aside so you can undo this straight afterwards.`)) return;
     try {
-      await restore(pending.backup, mode);
-      toast(mode === 'merge' ? 'Backup merged in' : 'Restored from backup', 'ok', { label: 'Undo', run: () => undo(false) });
+      done = summary(await restore(pending.backup, mode));
       pending = null;
+      toast(mode === 'merge' ? 'Merged' : 'Restored', 'ok', { label: 'Undo', run: () => undo(false) });
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
     }
@@ -79,6 +97,7 @@
     if (ask && !confirm(`Put back ${what} (from ${ago(u.at)})? Anything changed since then is kept aside too, so you can switch back afterwards.`)) return;
     try {
       toast((await undoRestore()) ? `Put back ${what}` : 'Nothing to undo');
+      done = '';
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
     }
@@ -142,11 +161,22 @@
       <p class="small"><strong>{pending.name}</strong>{pending.backup.exportedAt ? `, made ${formatDay(pending.backup.exportedAt.slice(0, 10))}` : ''}: {pending.counts.titles} titles, {pending.counts.links} sources, {pending.counts.seen} episodes seen, {pending.counts.watches} viewings.</p>
       <div class="row">
         <button class="primary" onclick={() => apply('merge')}>Merge into this browser</button>
-        <button class="danger" onclick={() => apply('replace')}>Replace everything</button>
+        {#if !pending.problems.length}<button class="danger" onclick={() => apply('replace')}>Replace everything</button>{/if}
         <button class="ghost" onclick={() => (pending = null)}>Cancel</button>
       </div>
-      <p class="small muted">Merge keeps everything here and adds what is missing; where both have the same title, the more recently edited version wins. Either way you can undo it afterwards.</p>
+      {#if pending.problems.length}
+        <div class="small" role="alert">
+          <p>{n(pending.problems.length, 'record')} in this file cannot be read and will be left out, so it can be merged but not used to replace everything:</p>
+          <ul>{#each pending.problems.slice(0, 5) as p}<li>{p}</li>{/each}</ul>
+          {#if pending.problems.length > 5}<p>…and {pending.problems.length - 5} more.</p>{/if}
+        </div>
+      {/if}
+      <p class="small muted">Merge keeps everything here and adds what is missing. Where both have a title, your latest edit of each thing (rating, note, status…) wins, and what you removed here stays removed. Either way you can undo it.</p>
     </div>
+  {/if}
+  {#if done}<p class="small" role="status">{done}</p>{/if}
+  {#if unreadable.length}
+    <p class="small" role="alert">{n(unreadable.length, 'record')} here cannot be read back from a backup, for example {unreadable[0]}. Everything else is in the file.</p>
   {/if}
   {#if data.value.undo && !pending}
     <p class="small muted">
@@ -173,7 +203,7 @@
 
 <section class="section card stack">
   <h2>Sites to search when a link breaks</h2>
-  <p class="small muted">Shown as “Find on …” under every source list. Use <code>{'{q}'}</code> where the title goes.</p>
+  <p class="small muted">Shown as “Find on …” under every source list. Use <code>{'{q}'}</code> where the title goes, and <code>{'{ss}'}</code>/<code>{'{ee}'}</code> if it can search for an episode.</p>
   <ul class="list">
     {#each data.value.sites as s, i}
       <li class="spread"><span><strong>{s.name}</strong> <span class="small muted break">{s.url}</span></span><button class="small ghost danger" onclick={() => removeSite(i)} aria-label="Remove {s.name}">Remove</button></li>

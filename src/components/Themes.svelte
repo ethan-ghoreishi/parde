@@ -1,7 +1,7 @@
 <script lang="ts">
   import { db, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { update } from '../lib/actions';
+  import { changeThemes } from '../lib/actions';
   import { parseThemes } from '../lib/handoff';
   import { counts } from '../lib/taste';
 
@@ -30,11 +30,11 @@
   );
   let custom = $state('');
 
-  const set = (themes: string[]) => (onchange ? onchange(themes) : update(title.id, { themes: themes.length ? themes : undefined }));
-  const toggle = (k: string) => set(chosen.includes(k) ? chosen.filter((x) => x !== k) : [...chosen, k]);
+  const change = (f: (themes: string[]) => string[]) => (onchange ? onchange(f(chosen)) : changeThemes(title.id, f));
+  const toggle = (k: string) => change((ts) => (ts.includes(k) ? ts.filter((x) => x !== k) : [...ts, k]));
   function addCustom() {
     const more = parseThemes(custom);
-    if (more.length) set([...new Set([...chosen, ...more])]);
+    if (more.length) change((ts) => [...new Set([...ts, ...more])]);
     custom = '';
   }
 </script>

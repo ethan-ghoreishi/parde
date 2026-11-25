@@ -51,10 +51,18 @@ export interface Progress {
   lastSeen?: Episode;
   /** Unmarked episodes before the furthest one seen (skipped, or never ticked) */
   skipped: number;
+  /** Out, unseen, and no longer in TVmaze's list: cannot be "next", but the series may not be over either */
+  unlisted: number;
 }
 
+/** Worth showing: in TVmaze's list, or one you have seen. */
+export const isListed = (e: Pick<Episode, 'id' | 'missingSince'>, seen: Set<number>) => !e.missingSince || seen.has(e.id);
+
+/** Dropping a series hides it from the calendar without changing your calendar choice. */
+export const onCalendar = (t: Pick<Title, 'followed' | 'status'>) => !!t.followed && t.status !== 'dropped';
+
 export function progress(episodes: Episode[], seen: Set<number>, now = new Date()): Progress {
-  const sorted = [...episodes].sort(byOrder);
+  const sorted = episodes.filter((e) => isListed(e, seen)).sort(byOrder);
   const last = sorted.findLastIndex((e) => seen.has(e.id));
   const ahead = sorted.slice(last + 1);
   return {
@@ -64,5 +72,6 @@ export function progress(episodes: Episode[], seen: Set<number>, now = new Date(
     total: sorted.length,
     lastSeen: sorted[last],
     skipped: last + 1 - sorted.slice(0, last + 1).filter((e) => seen.has(e.id)).length,
+    unlisted: episodes.filter((e) => !isListed(e, seen) && isAired(e, now) && (!sorted[last] || byOrder(e, sorted[last]) > 0)).length,
   };
 }

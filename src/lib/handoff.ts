@@ -1,6 +1,6 @@
 import type { Episode, Title } from './db';
-import { code } from './schedule';
-import { EXPECTATIONS, criticScore, referenceText, makerAffinity, rated, mean, beforeWatching } from './taste';
+import { code, type Progress } from './schedule';
+import { EXPECTATIONS, scoreText, makerAffinity, rated, mean, beforeWatching } from './taste';
 
 /** Reflection questions that work for almost anything; three are offered per title. */
 export const QUESTIONS = [
@@ -18,10 +18,23 @@ export const QUESTIONS = [
   'If it is about one idea, what is that idea in a sentence?',
 ];
 
-export function questionsFor(id: string, n = 3): string[] {
+/** Questions about an ending wait until you have reached it. */
+export function questionsFor(id: string, finished = true, n = 3): string[] {
   let h = 0;
   for (const c of id) h = (h * 33 + c.charCodeAt(0)) >>> 0;
-  return Array.from({ length: n }, (_, i) => QUESTIONS[(h + i * 5) % QUESTIONS.length]);
+  const list = finished ? QUESTIONS : QUESTIONS.filter((q) => !/\b(ending|remember in a year)\b/.test(q));
+  return Array.from({ length: n }, (_, i) => list[(h + i * 5) % list.length]);
+}
+
+/** How far into a series you are, for anything that could spoil it. Nothing for a film, or a series seen to its end. */
+export type Place = Pick<Progress, 'lastSeen' | 'next' | 'skipped' | 'unlisted'>;
+export const finishedAll = (t: Title, p: Place) => t.kind === 'film' || (!!p.lastSeen && !p.next && !p.skipped && !p.unlisted && t.showStatus === 'Ended');
+
+function spoilerRule(t: Title, p: Place | undefined, ok: string): string {
+  if (t.kind === 'film' || (p && finishedAll(t, p))) return ok;
+  if (!p?.lastSeen) return 'Strict rule: I have not recorded which episodes I have seen. Ask me how far I am before saying anything about the story.';
+  const skipped = p.skipped ? ` I also skipped ${p.skipped} earlier episode${p.skipped > 1 ? 's' : ''}: check with me before relying on one.` : '';
+  return `Strict rule: I have seen it only up to and including ${code(p.lastSeen)}. Say nothing about anything that happens after that: no hints, foreshadowing or "this becomes important later".${skipped}`;
 }
 
 const makers = (t: Title) => t.people.filter((p) => p.role === 'director' || p.role === 'creator').map((p) => p.name).slice(0, 2).join(' and ');
@@ -55,13 +68,13 @@ function yourView(t: Title, library: Title[]): string[] {
   if (t.note?.trim()) lines.push(`My notes:\n"""\n${t.note.trim()}\n"""`);
   const others = rated(library.filter((x) => x.id !== t.id));
   if (others.length >= 5 && t.rating) lines.push(`For calibration: I rate things ${mean(others.map((x) => x.rating!)).toFixed(1)}/10 on average.`);
-  const makers = new Map(makerAffinity(others, 2).map((a) => [a.key, a]));
+  const makers = makerAffinity(others, 2);
   for (const p of t.people.filter((p) => p.role === 'director' || p.role === 'creator')) {
-    const a = makers.get(p.name);
-    if (a) lines.push(`I have rated ${a.n} other titles by ${p.name}, ${a.avg.toFixed(1)}/10 on average (${a.titles.slice(0, 3).join(', ')}).`);
+    const a = makers.find((m) => (m.qid && p.qid ? m.qid === p.qid : m.key === p.name));
+    if (a) lines.push(`I have rated ${a.n} other titles by ${p.name}, ${a.avg.toFixed(1)}/10 on average (${a.of.slice(0, 3).map((x) => x.name).join(', ')}).`);
   }
-  const cs = criticScore(t);
-  if (cs?.kind === 'critics') lines.push(`Critics, for reference only: ${referenceText(cs)}.`);
+  const critics = t.critics.filter((c) => ['Rotten Tomatoes', 'Rotten Tomatoes average', 'Metacritic'].includes(c.source));
+  if (critics.length) lines.push(`Critics, for reference only: ${critics.map(scoreText).join('; ')}.`);
   return lines;
 }
 
@@ -74,7 +87,7 @@ export interface ReviewOptions {
  * A prompt that turns a rating, a few theme words and rough notes into a review in your own voice.
  * It forbids invented opinions and asks for inferences to be marked, so the draft stays yours.
  */
-export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions): string {
+export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions, place?: Place): string {
   const view = yourView(t, library);
   return [
     `Write a review of ${what(t)} in my voice, as if I wrote it myself.`,
@@ -83,7 +96,7 @@ export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions): stri
       'Rules:',
       '- Use only the reactions above. Do not invent opinions, praise or criticism I did not give.',
       '- Where you have to infer something to make it read well, put that part in [square brackets] so I can check it.',
-      `- ${o.spoilers ? 'Spoilers are fine.' : 'No spoilers beyond the basic setup.'}`,
+      `- ${o.spoilers ? spoilerRule(t, place, 'Spoilers are fine.') : `No spoilers beyond the basic setup.${t.kind === 'show' ? ` ${spoilerRule(t, place, '')}` : ''}`.trim()}`,
       `- ${o.length === 'short' ? 'Three to five sentences, first person, conversational, like a Letterboxd review. No headings.' : '300–450 words, first person, with a one-line verdict at the end. No headings.'}`,
       '- Plain, specific language; no clichés like "a must-watch" or "a rollercoaster".',
     ].join('\n'),
@@ -91,18 +104,18 @@ export function reviewPrompt(t: Title, library: Title[], o: ReviewOptions): stri
   ].join('\n\n');
 }
 
-export function reflectPrompt(t: Title, library: Title[] = []): string {
+export function reflectPrompt(t: Title, library: Title[] = [], place?: Place): string {
   return [
-    `I just watched ${what(t)}.`,
+    t.kind === 'film' || (place && finishedAll(t, place)) ? `I just watched ${what(t)}.` : `I am watching ${what(t)}.`,
     ...yourView(t, library),
-    `Help me think about it more deeply: offer two or three distinct interpretations (including one I probably have not considered), the philosophical questions it raises, and where it sits among related works. Spoilers are fine. Challenge my reading where it seems thin. Keep it conversational and end with one question back to me.`,
+    `Help me think about it more deeply: offer two or three distinct interpretations (including one I probably have not considered), the philosophical questions it raises, and where it sits among related works. ${spoilerRule(t, place, 'Spoilers are fine.')} Challenge my reading where it seems thin. Keep it conversational and end with one question back to me.`,
   ].filter(Boolean).join('\n\n');
 }
 
-export function recapPrompt(t: Title, last: Episode): string {
+export function recapPrompt(t: Title, last: Episode, skipped = 0): string {
   return [
     `Give me a spoiler-safe recap of the series ${what(t)}, up to and including ${code(last)}${last.name ? ` "${last.name}"` : ''}.`,
-    `Strict rule: say nothing about anything that happens after that episode — no hints, foreshadowing or "this becomes important later".`,
+    `Strict rule: say nothing about anything that happens after that episode — no hints, foreshadowing or "this becomes important later".${skipped ? ` I skipped ${skipped} earlier episode${skipped > 1 ? 's' : ''}; ask which before covering it.` : ''}`,
     `Cover where each main character stands, the open questions, and the key relationships, in under 300 words.`,
   ].join('\n\n');
 }

@@ -129,7 +129,7 @@ export async function fetchShow(id: number): Promise<{ meta: Meta; episodes: Tvm
   return { meta: showToMeta(s), episodes: s._embedded?.episodes ?? [] };
 }
 
-/** Map of show id → last-updated stamp, for shows changed in the last day/week. */
-export function showUpdates(since: 'day' | 'week') {
+/** Map of show id → last-updated stamp, for shows changed in the last day, week or month. */
+export function showUpdates(since: 'day' | 'week' | 'month') {
   return getJson<Record<string, number>>(`${API}/updates/shows?since=${since}`);
 }

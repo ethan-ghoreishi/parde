@@ -5,6 +5,7 @@
   import { toast, errorText } from '../lib/ui.svelte';
   import Scale from './Scale.svelte';
   import Themes from './Themes.svelte';
+  import Toast from './Toast.svelte';
 
   let { title, open = $bindable(false), partner }: { title: Title; open?: boolean; partner: string } = $props();
   let dialog: HTMLDialogElement;
@@ -13,6 +14,7 @@
   let rating = $state<number | undefined>();
   let partnerRating = $state<number | undefined>();
   let themes = $state<string[]>([]);
+  let saving = $state(false);
 
   $effect(() => {
     if (open && !dialog.open) {
@@ -25,13 +27,17 @@
   });
 
   async function save() {
+    if (saving) return; // a second tap must not log a second viewing
+    saving = true;
     try {
       // Plain copies: Svelte's state proxies cannot be stored in IndexedDB.
       await logWatch(title, { date, together, rating, partnerRating, themes: [...themes] });
       open = false;
       toast(`Logged ${title.name}`);
     } catch (e) {
-      toast(errorText(e), 'error');
+      toast(`Not saved: ${errorText(e)}`, 'error');
+    } finally {
+      saving = false;
     }
   }
 </script>
@@ -62,10 +68,11 @@
       <Themes {title} compact value={themes} onchange={(v) => (themes = v)} />
     </div>
     <div class="row">
-      <button class="primary" type="submit">Save</button>
+      <button class="primary" type="submit" disabled={saving}>Save</button>
       <button type="button" class="ghost" onclick={() => (open = false)}>Cancel</button>
     </div>
   </form>
+  <Toast />
 </dialog>
 
 <style>

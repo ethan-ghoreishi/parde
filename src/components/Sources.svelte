@@ -3,8 +3,8 @@
   import { resolveLinks, hostOf, isPattern, suggestPattern, openExternal, cleanUrl, expand, type Level } from '../lib/links';
   import { code } from '../lib/schedule';
   import { addLink, deleteLink, editLink } from '../lib/actions';
-  import { copy, toast, errorText } from '../lib/ui.svelte';
-  import { db, now } from '../lib/db';
+  import { copy, toast, undoable, errorText } from '../lib/ui.svelte';
+  import { now } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { getSetting } from '../lib/db';
   import { DEFAULT_SITES, siteUrl, validSite, type Site } from '../lib/sites';
@@ -74,17 +74,19 @@
     await editLink(l.id, { broken: on });
     if (on) {
       const next = working.find((r) => r.link.id !== l.id);
-      toast(next ? `Marked broken. Next: ${next.link.label || hostOf(next.url)}` : 'Marked broken. Add another source below.', 'ok', next ? { label: 'Open', run: () => open(next) } : undefined);
+      toast(next ? `Marked broken. Next: ${next.link.label || hostOf(next.url)}` : 'Marked broken. Add another source.', 'ok', next ? { label: `Open ${next.link.label || hostOf(next.url)}`, run: () => open(next) } : undefined);
     }
   }
 
   async function remove(l: Link) {
-    await deleteLink(l.id);
-    toast('Source removed', 'ok', { label: 'Undo', run: () => addLinkBack(l) });
+    undoable('Source removed', await deleteLink(l.id));
   }
-  const addLinkBack = (l: Link) => db.links.put(l);
 
-  const findQuery = $derived(title.name);
+  /** A search site can place the episode too, with the same {s}/{e} marks as a source. */
+  const siteHref = (s: Site) => {
+    const u = siteUrl(s, title.name);
+    return isPattern(u) ? expand(u, season ?? next?.season ?? 1, episode ?? next?.number ?? 1) : u;
+  };
 </script>
 
 <section class="sources" aria-label={heading}>
@@ -100,7 +102,7 @@
       {/each}
     </ul>
   {:else if !adding}
-    <p class="muted small">No working source saved{isEpisode ? ' for this episode' : ''}. Paste a link you watch on, or find one below.</p>
+    <p class="muted small">No {broken.length ? 'working ' : ''}source saved{isEpisode ? ' for this episode' : ''}. Add the link you watch on, or find one below.</p>
   {/if}
 
   {#if broken.length}
@@ -144,7 +146,7 @@
       <div class="row" style="margin-top: 0.75rem">
         <button class="primary small" type="submit" disabled={!cleanUrl(url)}>Save</button>
         <button class="small ghost" type="button" onclick={() => (adding = false)}>Cancel</button>
-        {#if url && !cleanUrl(url)}<span class="small" style="color: var(--danger)">Needs a full web address</span>{/if}
+        {#if url && !cleanUrl(url)}<span class="small" role="alert" style="color: var(--danger)">Needs a full web address</span>{/if}
       </div>
     </form>
   {/if}
@@ -152,7 +154,7 @@
   <div class="find row small">
     <span class="muted">Find on</span>
     {#each sites.value.filter(validSite) as s}
-      <a href={siteUrl(s, findQuery)} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">{s.name} ↗</a>
+      <a href={siteHref(s)} target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">{s.name} ↗</a>
     {/each}
     <a href="#/settings" class="muted">edit sites</a>
   </div>
@@ -179,14 +181,14 @@
           <span aria-hidden="true">↗</span>
         </button>
         <div class="row tools">
-          <button class="small ghost" onclick={() => copy(target(r))} aria-label="Copy link">Copy</button>
+          <button class="small ghost" onclick={() => copy(target(r))} aria-label="Copy link to {r.link.label || hostOf(r.url)}">Copy</button>
           {#if r.link.broken}
             <button class="small ghost" onclick={() => markBroken(r.link, false)}>Works again</button>
           {:else}
-            <button class="small ghost" onclick={() => markBroken(r.link, true)}>Broken</button>
+            <button class="small ghost" onclick={() => markBroken(r.link, true)} aria-label="{r.link.label || hostOf(r.url)} does not work">Doesn't work</button>
           {/if}
           <button class="small ghost" onclick={() => { editing = r.link.id; editUrl = r.link.url; editLabel = r.link.label ?? ''; }}>Edit</button>
-          <button class="small ghost danger" onclick={() => remove(r.link)} aria-label="Remove source">✕</button>
+          <button class="small ghost danger" onclick={() => remove(r.link)} aria-label="Remove {r.link.label || hostOf(r.url)}">✕</button>
         </div>
       </div>
     {/if}
@@ -198,7 +200,8 @@
   h3 { margin: 0; }
   ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
   li { border: 1px solid var(--line); border-radius: 10px; padding: 0.4rem; background: var(--surface); }
-  li.dim { opacity: 0.65; }
+  li.dim { border-style: dashed; }
+  li.dim .host { color: var(--muted); text-decoration: line-through; }
   .main { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; justify-content: space-between; }
   .open { background: transparent; border: none; padding: 0.2rem 0.5rem; gap: 0.5rem; flex: 1; justify-content: flex-start; min-width: 0; flex-wrap: wrap; white-space: normal; text-align: left; }
   .open:not(:disabled) .host { color: var(--accent); font-weight: 600; }
