@@ -481,7 +481,8 @@ test('finding your way: page titles, focus and the way back', async ({ page, bro
   await page.goBack();
   await page.locator('.season-head').first().waitFor();
   await page.waitForTimeout(1500);
-  expect(await page.evaluate(() => scrollY)).toBe(y);
+  // WebKit can restore to a nearby layout pixel when viewport measurements settle.
+  expect(Math.abs((await page.evaluate(() => scrollY)) - y)).toBeLessThanOrEqual(3);
 });
 
 test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the bottom edge and never covers the end of a page', async ({ page, isMobile }) => {
