@@ -24,8 +24,8 @@ const placeId = (name: string) => Object.entries(PLACES).find(([, n]) => n === n
 
 export const REVISIT: Thread = { key: 'revisit', label: 'Second look', why: 'Titles you previously passed on' };
 export const DECADES = [1960, 1970, 1980, 1990, 2000, 2010, 2020];
-export const KNOWN: Thread = { key: 'known', label: 'Remember what you’ve seen', why: 'Familiar films and series to add to your library' };
-export const SERIES: Thread = { key: 'known:series', label: 'Remember a series', why: 'Familiar series to add or pick up again' };
+export const KNOWN: Thread = { key: 'known', label: 'Remember what you’ve seen', why: 'Tap anything you know or are curious about. Ignore the rest' };
+export const SERIES: Thread = { key: 'known:series', label: 'Remember a series', why: 'Tap any you have seen, all of it or some' };
 const decade = (d: number): Thread => ({ key: `decade:${d}`, label: `The ${d}s`, why: `Films and series that began in the ${d}s` });
 const avg1 = (a: Pick<Affinity, 'avg' | 'n'>) => `you average ${a.avg.toFixed(1)} over ${a.n}`;
 
@@ -74,7 +74,10 @@ export function offer(all: Thread[], turn: number): Thread[] {
 // ---------- Shelves ----------
 
 type Row = [qid: number, name: string, year: number, tvmaze: number, wiki?: string];
-const seeds: Find[] = (seedRows as unknown as Row[]).map(([q, name, year, tvmaze, wiki]) => ({ qid: `Q${q}`, name, year, kind: tvmaze ? 'show' : 'film', tvmaze: tvmaze || undefined, wiki: wiki ?? name }));
+const bundled: Find[] = (seedRows as unknown as Row[]).map(([q, name, year, tvmaze, wiki]) => ({ qid: `Q${q}`, name, year, kind: tvmaze ? 'show' : 'film', tvmaze: tvmaze || undefined, wiki: wiki ?? name }));
+/** Best known first, three films to a series: the file lists every film before the first series. */
+const place = (kind: Find['kind'], at: (i: number) => number) => bundled.filter((f) => f.kind === kind).map((f, i) => ({ f, at: at(i) }));
+const seeds = [...place('film', (i) => i), ...place('show', (i) => i * 3 + 2.5)].sort((a, b) => a.at - b.at).map((x) => x.f);
 
 const seedById = new Map(seeds.map((f) => [f.qid, f]));
 
@@ -105,7 +108,7 @@ export async function lookUp(key: string): Promise<Find[]> {
 
 export const SHELF = 12;
 
-/** Browse every eligible candidate once per thread, with familiar titles first on the collection shelf. */
+/** The next twelve not yet shown: in order on a shelf for remembering, else eight near and four from further along. */
 export function shelf(all: Find[], library: Title[], dismissed: Set<string>, shown: Set<string>, year = new Date().getFullYear(), mix = true): Find[] {
   const have = new Set(library.flatMap((t) => [t.qid ?? t.id.replace(/^wd:/, ''), t.tvmaze ? `tvm:${t.tvmaze}` : t.id]));
   const list = [...new Map(all.map((f) => [f.tvmaze ? `tvm:${f.tvmaze}` : f.qid, f])).values()]

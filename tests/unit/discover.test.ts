@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DECADES, KNOWN, insight, lookUp, offer, premise, shelf, threadOf, threads } from '../../src/lib/discover';
+import { DECADES, KNOWN, SERIES, insight, lookUp, offer, premise, shelf, threadOf, threads } from '../../src/lib/discover';
 import { parseCritics, type Find } from '../../src/lib/api/wiki';
 import type { Title } from '../../src/lib/db';
 
@@ -52,6 +52,13 @@ describe('ways in', () => {
     expect(new Set(all.map((f) => f.qid)).size).toBe(all.length);
     expect(fetch).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+  it('remembering starts with films and series both, best known first, each once', async () => {
+    const all = await lookUp(KNOWN.key);
+    const first = all.slice(0, 12);
+    expect(first.filter((f) => f.kind === 'show')).toHaveLength(3);
+    expect(all.filter((f) => f.kind === 'film')[0]).toBe(first[0]);
+    expect(await lookUp(SERIES.key)).toEqual(all.filter((f) => f.kind === 'show'));
   });
 });
 

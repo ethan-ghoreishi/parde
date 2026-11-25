@@ -41,21 +41,28 @@ export const byOrder = (a: Episode, b: Episode) => a.season - b.season || a.numb
 
 export const code = (e: Pick<Episode, 'season' | 'number'>) => `S${two(e.season)}E${two(e.number)}`;
 
-/** An ended label alone cannot establish that the last episode is in our list. */
+/**
+ * "Ended" alone does not mean our list reaches the end: it may be a partial reply. Either every season is as long as
+ * TVmaze says, or the last date we hold is the one it ended on and the last season is not short. Neither alone will
+ * do: lengths are often off by one or two in long seasons (The Office, Buffy), a later special can carry the end date
+ * (Breaking Bad), and a season released in one day reaches the end date with its first episode. Episodes that never
+ * got a date (Firefly) are not waited for.
+ */
 export function completeSchedule(t: Pick<Title, 'showStatus' | 'endedOn' | 'episodeOrders'>, episodes: Episode[]) {
-  if (t.showStatus !== 'Ended' || !episodes.length) return false;
-  const ordered = [...episodes].sort(byOrder);
-  const orders = t.episodeOrders;
-  const last = ordered.at(-1)!;
-  const verifiedEnd = orders?.length
-    ? orders.length === last.season && orders.every((n, i) => n === ordered.filter((e) => e.season === i + 1).length)
-    : !!t.endedOn && last.airdate === t.endedOn;
-  return verifiedEnd && ordered.every((e, i) => {
-    if (e.missingSince || !isAired(e)) return false;
-    const prev = ordered[i - 1];
-    return prev?.season === e.season ? e.number === prev.number + 1 : e.number === 1 && e.season === (prev?.season ?? 0) + 1;
-  });
+  const listed = episodes.filter((e) => !e.missingSince);
+  const dated = listed.filter((e) => e.airdate);
+  if (t.showStatus !== 'Ended' || !dated.length || dated.some((e) => !isAired(e))) return false;
+  const orders = t.episodeOrders ?? [];
+  const last = Math.max(...listed.map((e) => e.season));
+  if (orders.length > last) return false;
+  const inSeason = (n: number) => listed.filter((e) => e.season === n).length;
+  if (orders.length && orders.every((n, i) => n === inSeason(i + 1))) return true;
+  const order = orders[last - 1] ?? 0;
+  return dated.map((e) => e.airdate).sort().at(-1) === t.endedOn && order - inSeason(last) <= order * 0.08;
 }
+
+/** Out, or never given a date by a series that is over: either can have been seen. */
+export const canMark = (t: Pick<Title, 'showStatus'>, e: Episode) => !e.missingSince && (isAired(e) || (!e.airdate && t.showStatus === 'Ended'));
 
 export interface Progress {
   /** The episode after the furthest one seen: where you are, even if you skipped something earlier */

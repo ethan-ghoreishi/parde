@@ -103,9 +103,10 @@ export function showToMeta(s: TvmShow): Meta {
     ...crew.filter((c) => c.type === 'Creator' || c.type === 'Developer').map((c) => ({ name: c.person.name, role: 'creator' as const })),
     ...(s._embedded?.cast ?? []).slice(0, 10).map((c) => ({ name: c.person.name, role: 'cast' as const })),
   ];
-  const seasons = s._embedded?.seasons?.filter((season) => season.number > 0).sort((a, b) => a.number - b.number);
-  const episodeOrders = seasons?.length && seasons.every((season, i) => season.number === i + 1 && Number.isInteger(season.episodeOrder) && season.episodeOrder! > 0)
-    ? seasons.map((season) => season.episodeOrder!) : undefined;
+  // Season numbers can skip (Money Heist has no 2): a season that does not exist has none. By-year seasons are left out.
+  const seasons = s._embedded?.seasons?.filter((x) => x.number > 0);
+  const episodeOrders = seasons?.length && seasons.every((x) => x.number < 100 && Number.isInteger(x.episodeOrder) && x.episodeOrder! > 0)
+    ? Array.from({ length: Math.max(...seasons.map((x) => x.number)) }, (_, i) => seasons.find((x) => x.number === i + 1)?.episodeOrder ?? 0) : undefined;
   return {
     kind: 'show',
     name: s.name,

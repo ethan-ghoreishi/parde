@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { parseCsv, parseImport, readImport, parseLine, choose, likely, patchFor, mergeRows, resolve, scaleOf, commit, type Item, type Row } from '../../src/lib/importer';
 import { db, type Episode, type Title } from '../../src/lib/db';
+import { setProgress } from '../../src/lib/actions';
 
 describe('import parsing', () => {
   it('reads quoted CSV fields with commas, quotes and line breaks', () => {
@@ -109,7 +110,9 @@ describe('import matching', () => {
     expect(mergeRows([r({ status: 'want', upTo: { season: 1, episode: 4 } }), r({ upTo: { season: 2, episode: 1 } })])).toMatchObject({ status: 'watched', upTo: { season: 2, episode: 1 } });
   });
   it('a film on your want list that the history says you watched becomes watched', () => {
-    expect(patchFor({ line: 1, raw: '', name: 'x', rating: 8, status: 'watched', watchedOn: '2024-01-01' }, { kind: 'film', status: 'want' } as Title)).toEqual({ rating: 8, status: 'watched', finishedAt: '2024-01-01' });
+    expect(patchFor({ line: 1, raw: '', name: 'x', rating: 8, status: 'watched', watchedOn: '2024-01-01' }, { kind: 'film', status: 'want' } as Title)).toEqual({ rating: 8, status: 'watched', finishedAt: '2024-01-01', firstWatchedAt: '2024-01-01' });
+    // Seen who knows when: keenness recorded here may have come after
+    expect(patchFor({ line: 1, raw: '', name: 'x', status: 'watched' }, { kind: 'film', status: 'want' } as Title)).toMatchObject({ status: 'watched', hindsight: true });
     expect(patchFor({ line: 1, raw: '', name: 'x', status: 'watched' }, { kind: 'film', status: 'dropped' } as Title)).toEqual({});
   });
   it('never overwrites what you already recorded', () => {
@@ -177,12 +180,41 @@ describe('import: series you already have', () => {
     await commit([item({ upTo: { season: 1, episode: 2 } })], {}, () => {});
     expect((await db.seen.toCollection().primaryKeys()).sort()).toEqual([1, 2]);
   });
+  it('places one you said you are watching but had not placed; one you cleared is asked about, never silently skipped', async () => {
+    await db.titles.update('tvm:7', { status: 'watching', firstWatchedAt: '2026-01-02' });
+    expect(await commit([item({ upTo: { season: 1, episode: 2 } })], {}, () => {})).toMatchObject({ updated: 1, toPlace: [], failed: [] });
+    expect((await db.seen.toCollection().primaryKeys()).sort()).toEqual([1, 2]);
+    await setProgress('tvm:7', null);
+    expect((await commit([item({ upTo: { season: 1, episode: 2 } })], {}, () => {})).toPlace).toEqual(['tvm:7']);
+    expect(await db.seen.count()).toBe(0);
+  });
   it('never moves you backwards, and never forwards without asking', async () => {
     await db.seen.bulkAdd([1, 2].map((episodeId) => ({ episodeId, titleId: 'tvm:7', seenAt: '2026-01-01' })));
     expect((await commit([item({ upTo: { season: 1, episode: 1 } })], {}, () => {})).ahead).toEqual([]);
     const out = await commit([item({ upTo: { season: 1, episode: 3 } })], {}, () => {});
     expect(out.ahead).toMatchObject([{ id: 'tvm:7', here: 'S01E02', ep: { id: 3 } }]);
     expect(await db.seen.count()).toBe(2);
+  });
+});
+
+describe('import: a new series', () => {
+  const show = (status: string, ended: string | null) => ({
+    id: 9, name: 'Show', genres: [], status, ended, premiered: '2020-01-01', averageRuntime: 30, runtime: 30, rating: { average: null }, network: null, webChannel: null, externals: { imdb: null }, image: null, summary: null, updated: 2,
+    _embedded: { seasons: [{ number: 1, episodeOrder: 2 }], episodes: [1, 2].map((n) => ({ id: n, name: `E${n}`, season: 1, number: n, airdate: '2020-01-01', airtime: '', airstamp: null, runtime: 30, summary: null })) },
+  });
+  const item = (r: Partial<Row>): Item => ({ row: { line: 1, raw: 'x', name: 'Show', status: 'watched', kind: 'show', ...r }, candidates: [{ kind: 'show', tvmaze: 9, name: 'Show' }], pick: 0, sure: true });
+  const load = async (body: unknown, r: Partial<Row>) => {
+    await Promise.all(db.tables.map((t) => t.clear()));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body))));
+    await commit([item(r)], {}, () => {});
+    vi.unstubAllGlobals();
+    return (await db.titles.get('tvm:9'))!;
+  };
+  it('seen to its end keeps the date it was seen; one still running, or part seen, has none', async () => {
+    expect(await load(show('Ended', '2020-01-01'), { watchedOn: '2021-05-05' })).toMatchObject({ status: 'watched', finishedAt: '2021-05-05' });
+    const running = await load(show('Running', null), { watchedOn: '2021-05-05' });
+    const partly = await load(show('Ended', '2020-01-01'), { watchedOn: '2021-05-05', upTo: { season: 1, episode: 1 } });
+    expect([running, partly].map((t) => [t.status, t.finishedAt, t.edited?.finishedAt])).toEqual([['watching', undefined, undefined], ['watching', undefined, undefined]]);
   });
 });
 
@@ -228,5 +260,21 @@ describe('import: what could not be checked is not "not found"', () => {
     ] });
     const r = await resolve([row({ imdb: 'tt1', kind: 'film' }), row({ imdb: 'tt2' }), row({ imdb: 'tt3' })], () => {});
     expect(r.map((x) => x.sure)).toEqual([false, false, true]);
+  });
+  it('an IMDb id nobody lists is looked for by title, and asked about; one that could not be checked can be tried again', async () => {
+    const fargo = [{ title: 'Fargo', index: 1, description: '1996 film', pageprops: { wikibase_item: 'Q222720' } }];
+    serve({ sparql: [], wiki: fargo });
+    const [unlisted] = await resolve([row({ imdb: 'tt9', year: 1996 })], () => {});
+    expect(unlisted).toMatchObject({ sure: false, pick: -1, candidates: [{ qid: 'Q222720' }] });
+    expect(unlisted.error).toBeUndefined();
+    serve({ sparql: 404, wiki: fargo });
+    const [unchecked] = await resolve([row({ imdb: 'tt9', kind: 'film', year: 1996 })], () => {});
+    expect(unchecked.error).toBeTruthy();
+  });
+  it('counts every line once, however it is settled', async () => {
+    serve({ sparql: [b({ imdb: 'tt3', item: `${Q}Q3`, itemLabel: 'C', types: `${Q}Q11424` })], wiki: [] });
+    let last = 0;
+    await resolve([row({ imdb: 'tt3' }), row({ imdb: 'tt9' }), row({})], (done) => (last = done));
+    expect(last).toBe(3);
   });
 });

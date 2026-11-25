@@ -292,7 +292,7 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   const damaged = JSON.parse(text);
   damaged.data.watches.push({ id: 'w', titleId: damaged.data.titles[0].id, date: 'yesterday', together: true });
   await page.locator('input[type=file]').setInputFiles({ name: 'damaged.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(damaged)) });
-  await expect(page.getByRole('alert')).toContainText('1 record in this file cannot be read');
+  await expect(page.getByRole('alert')).toContainText('1 record in this file cannot be fully read');
   await expect(page.getByRole('button', { name: 'Replace everything' })).toBeHidden();
   await page.getByRole('button', { name: 'Cancel' }).click();
 
@@ -420,6 +420,128 @@ test('Next shelf advances during delayed details and Back restores the page with
   await page.goBack();
   await expect(tiles.first()).toHaveAttribute('id', second[0]);
   await expect(page.getByRole('heading', { name: 'The 1990s' })).toBeVisible();
+});
+
+test('a new visit carries on from the shelf you had reached, and Second look still has what you passed on', async ({ page }) => {
+  await page.goto('./#/discover?from=decade:1990');
+  const tiles = page.locator('.shelf .tile');
+  const ids = () => tiles.evaluateAll((rows) => rows.map((row) => row.id));
+  await expect(tiles).toHaveCount(12);
+  const first = await ids();
+  await tiles.first().click();
+  await page.locator('.panel').getByRole('button', { name: 'Not for me' }).click();
+  await expect(tiles.first()).toContainText('Not for you');
+  await page.getByRole('button', { name: 'Next shelf' }).click();
+  await expect.poll(async () => (await ids())[0]).not.toBe(first[0]);
+  const second = await ids();
+  await expect.poll(() => stored(page, 'settings', 'browsed')).toBeTruthy();
+  await page.reload(); // the app was closed and opened again
+  await expect(tiles).toHaveCount(12);
+  expect(await ids()).toEqual(second);
+  await page.goto('./#/discover?from=revisit');
+  await expect(tiles).toHaveCount(1);
+  expect(await ids()).toEqual([first[0]]);
+});
+
+test('scores opened on an earlier visit still count as opened when you choose, also after a pass', async ({ page }) => {
+  const panel = page.locator('.panel');
+  const heat = page.locator('.tile', { hasText: 'Heat' });
+  const collateral = './#/discover?from=title:Q42&name=Collateral';
+  await page.goto(collateral);
+  await heat.click();
+  await panel.getByText('What others thought').click();
+  await expect(page.getByText(/92% of critics positive/)).toBeVisible();
+  await page.reload();
+  await heat.click();
+  await panel.getByRole('button', { name: 'Not for me' }).click();
+  await expect(heat).toContainText('Not for you');
+  expect((await stored(page, 'dismissed', 'Q42198'))!.scoresAt).toBeTruthy();
+  await page.reload();
+  await page.getByRole('link', { name: 'Second look' }).click();
+  await heat.click();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel).toContainText('On your list.');
+  const t = (await stored(page, 'titles', 'wd:Q42198')) as { scoresAt: string; chosenAt: string };
+  expect(t.scoresAt < t.chosenAt).toBe(true);
+  // Taking it back leaves it as it was: passed on
+  await panel.getByRole('button', { name: 'Undo' }).click();
+  await expect.poll(() => stored(page, 'titles', 'wd:Q42198')).toBeUndefined();
+  expect(await stored(page, 'dismissed', 'Q42198')).toBeTruthy();
+});
+
+test('Undo on a shelf is only for what was added there: not for the same title added again elsewhere, nor after a restore', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+  const panel = page.locator('.panel');
+  await page.goto('./#/discover?from=title:Q42&name=Collateral');
+  const heat = page.locator('.tile', { hasText: 'Heat' });
+  await heat.click();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel.getByRole('button', { name: 'Undo' })).toBeVisible();
+  // Removed on its own page, then added again from a filmography: another record
+  await panel.getByRole('link', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
+  await page.goto('./#/p?q=Q548823&name=Denis+Villeneuve');
+  const row = page.locator('.work li', { hasText: 'Heat' });
+  await row.getByRole('button', { name: 'Seen' }).click();
+  await row.getByRole('button', { name: '8', exact: true }).click();
+  await page.getByRole('link', { name: 'Discover', exact: true }).first().click();
+  await expect(heat).toContainText('Seen');
+  if (!(await panel.isVisible())) await heat.click();
+  await expect(panel).toContainText('Seen: 8/10.');
+  await expect(panel.getByRole('button', { name: 'Undo' })).toBeHidden();
+
+  // Added here, then the collection is replaced: a fresh start, with nothing of the old shelf to undo
+  await page.locator('.tile', { hasText: 'Manhunter' }).click();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel.getByRole('button', { name: 'Undo' })).toBeVisible();
+  await page.goto('./#/settings');
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Save a backup' }).click()]);
+  const text = readFileSync(await dl.path(), 'utf8');
+  await page.locator('input[type=file]').setInputFiles({ name: 'parde.json', mimeType: 'application/json', buffer: Buffer.from(text) });
+  await page.getByRole('button', { name: 'Replace everything' }).click();
+  await expect(page.getByText(/^Replaced:/)).toBeVisible();
+  await page.getByRole('link', { name: 'Discover', exact: true }).first().click();
+  await expect(page.getByRole('heading', { name: /Remember what.you.ve seen/ })).toBeVisible();
+  await page.goto('./#/discover?from=title:Q42&name=Collateral');
+  await expect(page.locator('.tile', { hasText: 'Thief' })).toBeVisible();
+  await expect(page.locator('.tile', { hasText: 'Manhunter' })).toBeHidden(); // it is in the library now: not offered, not undoable
+});
+
+test('a save that outlives its page does not bring the old shelf back', async ({ page }) => {
+  let release = () => {};
+  const held = new Promise<void>((ok) => (release = ok));
+  await page.route(/api\.tvmaze\.com\/shows\/\d+/, async (r) => {
+    await held;
+    await r.fulfill({ json: { ...sev, id: Number(new URL(r.request().url()).pathname.split('/').pop()) } });
+  });
+  await page.goto('./#/discover?from=known:series');
+  const tiles = page.locator('.shelf .tile');
+  const ids = () => tiles.evaluateAll((rows) => rows.map((row) => row.id));
+  await expect(tiles).toHaveCount(12);
+  const first = await ids();
+  await tiles.first().click();
+  await page.locator('.panel').getByRole('button', { name: 'Seen some' }).click();
+  await page.getByRole('link', { name: 'Your taste' }).click();
+  await expect(page.getByRole('heading', { name: 'Your taste' })).toBeVisible();
+  await page.goBack();
+  await expect(tiles).toHaveCount(12);
+  await page.getByRole('button', { name: 'Next shelf' }).click();
+  await expect.poll(async () => (await ids())[0]).not.toBe(first[0]);
+  const second = await ids();
+  release();
+  await expect.poll(() => page.evaluate(() => new Promise<number>((ok) => {
+    const open = indexedDB.open('parde');
+    open.onsuccess = () => {
+      const q = open.result.transaction('titles').objectStore('titles').count();
+      q.onsuccess = () => (open.result.close(), ok(q.result));
+    };
+  }))).toBe(1);
+  await page.waitForTimeout(200);
+  await page.getByRole('link', { name: 'Your taste' }).click();
+  await page.goBack();
+  await expect(tiles).toHaveCount(12);
+  expect(await ids()).toEqual(second);
 });
 
 test('a write that fails is never reported as done', async ({ page }) => {

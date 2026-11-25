@@ -146,7 +146,7 @@ describe('backup integrity', () => {
       { titles: [T('wd:Q1')], links: [{ id: 'l', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01', episode: 2 }] },
     ]) expect(problems(bad), JSON.stringify(bad)).toHaveLength(1);
   });
-  it('merging an older backup keeps uncertain episode IDs and their marks without transferring them', async () => {
+  it('a mark from an older backup moves to the same episode under its new id, and only to that', async () => {
     await db.titles.add(T('tvm:7', { kind: 'show', status: 'watching', showStatus: 'Running', updatedAt: '2026-05-01' }));
     await db.episodes.bulkAdd([E(201, 1, { titleId: 'tvm:7' }), E(202, 2, { titleId: 'tvm:7' })]);
     const old = parseBackup(file({
@@ -156,9 +156,9 @@ describe('backup integrity', () => {
     }));
     if (!old.ok) throw new Error(old.error);
     await restore(old.backup, 'merge');
-    expect(await db.episodes.get(101)).toMatchObject({ missingSince: expect.any(String) });
-    expect(await db.seen.get(101)).toMatchObject({ seenAt: '2026-01-01' });
-    expect(await db.seen.get(201)).toBeUndefined();
+    expect(await db.episodes.get(101)).toMatchObject({ missingSince: expect.any(String) }); // set aside, never deleted
+    expect(await db.seen.get(201)).toMatchObject({ seenAt: '2026-01-01' });
+    expect(await db.seen.get(202)).toBeUndefined();
   });
 });
 
@@ -235,7 +235,7 @@ describe('skipped episodes', () => {
     await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', endedOn: '2020-01-01', followed: true, status: 'watching' }));
     await db.episodes.bulkAdd([E(1, 1), E(2, 2), E(3, 3), E(4, 4)]);
   });
-  it('an unmarked earlier episode does not block Up next and completion waits for it', async () => {
+  it('an unmarked earlier episode holds back neither Up next nor finishing', async () => {
     await db.seen.bulkPut([1, 3].map((episodeId) => ({ episodeId, titleId: 'tvm:1', seenAt: 'x' })));
     const { progress } = await import('../../src/lib/schedule');
     const p = progress(await db.episodes.toArray(), new Set([1, 3]));
@@ -243,14 +243,21 @@ describe('skipped episodes', () => {
     expect(p.skipped).toBe(1);
     expect(p.unseenAired).toBe(1);
     await setSeen(E(4, 4), true);
-    expect((await db.titles.get('tvm:1'))?.status).toBe('watching');
+    expect((await db.titles.get('tvm:1'))?.status).toBe('watched');
     await setSeen(E(2, 2), true);
     expect((await db.titles.get('tvm:1'))?.status).toBe('watched');
+  });
+  it('ticking the last episode by mistake and unticking it leaves no finish date behind', async () => {
+    await setSeen(E(4, 4), true);
+    expect(await db.titles.get('tvm:1')).toMatchObject({ status: 'watched', finishedAt: expect.any(String) });
+    await setSeen(E(4, 4), false);
+    expect((await db.titles.get('tvm:1'))?.status).toBe('watching');
+    expect((await db.titles.get('tvm:1'))?.finishedAt).toBeUndefined();
   });
 });
 
 describe('episode refresh', () => {
-  it('keeps the original mark when TVmaze gives the slot a new ID', async () => {
+  it('a mark follows its episode to a new id in the same place, with the same date and name', async () => {
     await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
     await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
     await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
@@ -263,8 +270,22 @@ describe('episode refresh', () => {
       vi.unstubAllGlobals();
     }
     expect(await db.episodes.get(70)).toMatchObject({ missingSince: expect.any(String) });
+    expect(await db.seen.get(80)).toMatchObject({ titleId: 'tvm:7' });
+    expect(await db.seen.get(70)).toBeUndefined();
+  });
+  it('a different episode in the same place takes no mark', async () => {
+    await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
+    await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
+    await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
+    const ep = (id: number, number: number, name: string) => ({ id, name, season: 1, number, airdate: '2020-01-01', airtime: '', airstamp: null, runtime: 30, summary: null });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(show([ep(80, 1, 'Another pilot'), ep(71, 2, 'E2')])))));
+    try {
+      await refreshTitle((await db.titles.get('tvm:7'))!);
+    } finally {
+      vi.unstubAllGlobals();
+    }
     expect(await db.seen.get(80)).toBeUndefined();
-    expect(await db.seen.get(70)).toMatchObject({ titleId: 'tvm:7' });
+    expect(await db.seen.get(70)).toBeTruthy();
   });
 
   const show = (eps: unknown[] | undefined, imdb: string | null = null) => ({

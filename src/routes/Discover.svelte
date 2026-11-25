@@ -1,21 +1,32 @@
 <script lang="ts" module>
+  import { SvelteMap } from 'svelte/reactivity';
+  import type { Dismissed as D } from '../lib/db';
   import type { Find as F, Meta as M } from '../lib/api/wiki';
   import type { Thread as W } from '../lib/discover';
-  /** The shelf you were at, so opening a title and coming Back finds it as you left it. */
+  /** The shelves you were at, so opening a title and coming Back finds them as you left them. */
   const shelves = new Map<string, { thread: W; found: F[]; items: F[]; metas: Map<string, M>; pics: Record<string, string>; shown: Set<string>; open: string | null }>();
-  const opened: Record<string, { at: string; critics: import('../lib/db').CriticScore[] }> = {};
+  /** Added from a shelf on this visit, with when: undone here only while it is still that same record */
+  const added = new SvelteMap<string, { at: string; passed?: D }>();
   let lastKey = 'known';
-  const addedHere = new Set<string>();
+  // Somewhere new each visit, and the same for as long as it lasts.
+  let turn = Math.floor(Math.random() * 12);
+
+  /** Another collection is here now (a restore, or its undo): nothing remembered from the last one applies. */
+  export function forgetShelves() {
+    shelves.clear();
+    added.clear();
+    lastKey = 'known';
+  }
 </script>
 
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
-  import { db, now, type Title } from '../lib/db';
+  import { db, getSetting, now, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { route, titleHref } from '../lib/router.svelte';
   import { filmMetas, posters, type Find, type Meta } from '../lib/api/wiki';
   import { findShow, showForImdb } from '../lib/api/tvmaze';
-  import { addFilm, addShow, removeTitle, sawScores, saveFilmMeta, update, dismissTitle, clearDismissal } from '../lib/actions';
+  import { addFilm, addShow, removeTitle, sawScores, sawScoresOf, rememberShelf, saveFilmMeta, update, dismissTitle, clearDismissal } from '../lib/actions';
   import { KNOWN, REVISIT, SERIES, insight, lookUp, offer, premise, revisitCandidates, shelf, threadOf, threads, type Thread } from '../lib/discover';
   import { toast, undoable, errorText, ui } from '../lib/ui.svelte';
   import { runtime } from '../lib/format';
@@ -27,15 +38,16 @@
   import DiscoverTabs from '../components/DiscoverTabs.svelte';
 
   const data = live(
-    () => async () => ({ titles: await db.titles.toArray(), dismissed: (await db.dismissed.toArray()).sort((a, b) => (b.at ?? '').localeCompare(a.at ?? '')) }),
-    { titles: [] as Title[], dismissed: [] as import('../lib/db').Dismissed[] },
+    () => async () => ({
+      titles: await db.titles.toArray(),
+      dismissed: (await db.dismissed.toArray()).sort((a, b) => (b.at ?? '').localeCompare(a.at ?? '')),
+    }),
+    { titles: [] as Title[], dismissed: [] as D[] },
   );
   const library = $derived(data.value.titles);
   const all = $derived(threads(library));
-  let turn = 0;
   // Offered ways in stay put while you use the shelf, and change when you ask for others.
   let ways = $state.raw<Thread[]>([]);
-  const suggestion = $derived(ways.find((w) => w.key.startsWith('title:') || w.key.startsWith('about:')));
 
   let thread = $state.raw<Thread | undefined>();
   let found = $state.raw<Find[]>([]);
@@ -48,16 +60,18 @@
   let busy = $state<Record<string, boolean>>({});
   let shown = $state.raw(new Set<string>());
   let detailsLoading = $state(false);
-  /** Added from this shelf: only these can be undone here */
-  let here = $state.raw(new Set(addedHere));
   let seq = 0;
-  onDestroy(() => { seq++; });
+  let gone = false;
+  onDestroy(() => {
+    gone = true;
+    seq++;
+  });
 
   const ownOf = (f: Find) => library.find((t) => t.qid === f.qid || t.id === `wd:${f.qid}` || (f.tvmaze && t.tvmaze === f.tvmaze));
   const dismissed = $derived(new Set(data.value.dismissed.map((d) => d.qid)));
   const passed = (f: Find) => dismissed.has(f.qid);
   const revisit = $derived(thread?.key === REVISIT.key);
-  const reconsider = $derived(revisitCandidates(data.value.dismissed));
+  const reconsider = $derived(revisitCandidates(data.value.dismissed).filter((f) => !ownOf(f)));
   const unseen = $derived(shelf(revisit ? reconsider : found, library, revisit ? new Set() : dismissed, shown, undefined, !thread?.key.startsWith('known') && !revisit));
 
   $effect(() => {
@@ -68,7 +82,9 @@
       const t = threadOf(key ?? lastKey, library, name) ?? KNOWN;
       lastKey = t.key;
       ways = offer(all, turn).filter((x) => x.key !== t.key);
-      const cached = shelves.get(t.key);
+      let cached = shelves.get(t.key);
+      // Every title on it decided since: a new second look, not the old one.
+      if (t.key === REVISIT.key && !cached?.items.some(passed)) cached = undefined;
       if (!cached) {
         void start(t);
         return;
@@ -83,7 +99,7 @@
   });
 
   function keep() {
-    if (!thread || loading) return;
+    if (gone || !thread || loading) return; // a save that outlived the page must not bring its old shelf back
     shelves.delete(thread.key);
     shelves.set(thread.key, { thread, found, items, metas, pics, shown, open });
     if (shelves.size > 12) shelves.delete(shelves.keys().next().value!);
@@ -101,11 +117,17 @@
     loading = true;
     detailsLoading = false;
     try {
-      const list = t.key === REVISIT.key
-        ? reconsider
-        : await lookUp(t.key);
+      const list = t.key === REVISIT.key ? reconsider : await lookUp(t.key);
+      const before = t.key === REVISIT.key ? [] : ((await getSetting<Record<string, string[]>>('browsed', {}))[t.key] ?? []);
       if (mine !== seq) return;
       found = list;
+      shown = new Set(before);
+      if (!unseen.length) shown = new Set(); // all of it seen before: from the top again
+      if (!unseen.length && t.key === KNOWN.key && !route.params.get('from') && ways.length) {
+        lastKey = ways[0].key; // nothing left to remember: somewhere new
+        void start(ways[0]);
+        return;
+      }
       loading = false;
       fill(mine);
     } catch (e) {
@@ -130,7 +152,7 @@
       metas = m;
       for (const f of items) {
         const details = m.get(f.qid);
-        if (f.kind === 'film' && details && addedHere.has(`wd:${f.qid}`)) {
+        if (f.kind === 'film' && details && added.has(`wd:${f.qid}`)) {
           void saveFilmMeta(`wd:${f.qid}`, details).catch(() => {});
         }
       }
@@ -157,6 +179,7 @@
   }
 
   async function another() {
+    if (thread && !revisit) void rememberShelf(thread.key, [...shown]).catch(() => {}); // only where to carry on next time
     fill();
     await tick();
     document.getElementById('shelf-heading')?.focus({ preventScroll: true });
@@ -182,55 +205,59 @@
   }
 
   async function add(f: Find, patch: Partial<Title>, progress?: 'all') {
-    if (f.kind === 'film') return addFilm(f.qid, patch, metas.get(f.qid) ?? {
-      qid: f.qid, name: f.name, year: f.year, wiki: f.wiki, kind: 'film', genres: [], people: [], countries: [], languages: [], subjects: [], critics: [],
-    }, !metas.has(f.qid));
-    const m = metas.get(f.qid);
-    const tvm = f.tvmaze ?? (m?.imdb ? await showForImdb(m.imdb) : await findShow(f.name, f.year));
-    if (!tvm) throw new Error(`No unambiguous TVmaze match for ${f.name}. Try Add to choose the series.`);
-    return addShow(tvm, { ...patch, qid: f.qid }, progress);
+    const before = now();
+    const passed = data.value.dismissed.find((d) => d.qid === f.qid);
+    let id: string;
+    if (f.kind === 'film') {
+      id = await addFilm(f.qid, patch, metas.get(f.qid) ?? {
+        qid: f.qid, name: f.name, year: f.year, wiki: f.wiki, poster: f.wiki && pics[f.wiki], kind: 'film', genres: [], people: [], countries: [], languages: [], subjects: [], critics: [],
+      }, !metas.has(f.qid));
+    } else {
+      const m = metas.get(f.qid);
+      const tvm = f.tvmaze ?? (m?.imdb ? await showForImdb(m.imdb) : await findShow(f.name, f.year));
+      if (!tvm) throw new Error(`${f.name} cannot be matched for certain. Use Add to choose the series.`);
+      id = await addShow(tvm, { ...patch, qid: f.qid }, progress);
+    }
+    const t = await db.titles.get(id);
+    if (!t || t.addedAt < before) throw new Error(`${f.name} is already in your library.`);
+    added.set(id, { at: t.addedAt, passed });
   }
 
   const seen = (f: Find, rating?: number) =>
     act(f, async () => {
       const own = ownOf(f);
       if (own) return update(own.id, { rating });
-      const id = await add(f, { status: f.kind === 'film' ? 'watched' : 'watching', rating }, f.kind === 'show' ? 'all' : undefined);
-      addedHere.add(id);
-      here = new Set(addedHere);
+      await add(f, { status: f.kind === 'film' ? 'watched' : 'watching', rating }, f.kind === 'show' ? 'all' : undefined);
     });
 
-  const partly = (f: Find) => act(f, async () => {
-    const id = await add(f, { status: 'watching' });
-    addedHere.add(id);
-    here = new Set(addedHere);
-  });
+  const partly = (f: Find) => act(f, () => add(f, { status: 'watching' }));
 
-  const want = (f: Find) => act(f, async () => {
-    const id = await add(f, { status: 'want', chosenAt: now(), choiceScores: opened[f.qid]?.critics ?? metas.get(f.qid)?.critics ?? [], scoresAt: opened[f.qid]?.at });
-    addedHere.add(id);
-    here = new Set(addedHere);
-  });
-
-  const pass = (f: Find) => act(f, () =>
-    dismissTitle({ qid: f.qid, name: f.name, kind: f.kind, year: f.year, tvmaze: f.tvmaze, at: now(), critics: opened[f.qid]?.critics ?? metas.get(f.qid)?.critics ?? [], scoresAt: opened[f.qid]?.at }),
+  /** When its scores were first opened, here or before you passed on it */
+  const opened = async (f: Find) => (await getSetting<Record<string, string>>('scoresSeen', {}))[f.qid] ?? (await db.dismissed.get(f.qid))?.scoresAt;
+  const want = (f: Find) => act(f, async () => add(f, { status: 'want', chosenAt: now(), choiceScores: metas.get(f.qid)?.critics ?? [], scoresAt: await opened(f) }));
+  const pass = (f: Find) => act(f, async () =>
+    dismissTitle({ qid: f.qid, name: f.name, kind: f.kind, year: f.year, tvmaze: f.tvmaze, at: now(), critics: metas.get(f.qid)?.critics ?? [], scoresAt: await opened(f) }),
   );
 
+  /** Still the record added here, with nothing recorded about it elsewhere: not one a restore or another page put in its place. */
+  const canUndo = (own: Title) => added.get(own.id)?.at === own.addedAt && !own.note && !own.finishedAt && !own.themes?.length && own.partnerRating === undefined;
   const undo = (f: Find) =>
     act(f, async () => {
       const own = ownOf(f);
-      if (own) {
-        undoable(`${f.name} taken out again`, await removeTitle(own.id));
-        addedHere.delete(own.id);
-        here = new Set(addedHere);
-      }
-      else await clearDismissal(f.qid);
+      if (!own) return clearDismissal(f.qid);
+      const passed = added.get(own.id)?.passed;
+      const back = await removeTitle(own.id);
+      added.delete(own.id);
+      if (passed) await dismissTitle(passed); // it was passed on before: so it is again
+      undoable(`${f.name} taken out again`, async () => {
+        if (passed) await clearDismissal(f.qid);
+        await back();
+      });
     });
 
   function sawFor(f: Find) {
-    opened[f.qid] ??= { at: now(), critics: metas.get(f.qid)?.critics ?? [] };
     const own = ownOf(f);
-    if (own) return sawScores(own);
+    return own ? sawScores(own) : sawScoresOf(f.qid);
   }
 
   const people = (m: Meta | undefined, role: 'makers' | 'cast') =>
@@ -278,12 +305,9 @@
 </div>
 
 <div class="row how">
-  {#if thread?.key !== KNOWN.key}<a class="chip" href="#/discover?from=known">Add familiar titles</a>{/if}
-  {#if thread?.key === KNOWN.key}<a class="chip" href={link(SERIES)}>Browse series</a>{/if}
+  {#if thread?.key !== KNOWN.key}<a class="chip" href="#/discover?from=known">{KNOWN.label}</a>{:else}<a class="chip" href={link(SERIES)}>Series only</a>{/if}
   {#if reconsider.length && !revisit}<a class="chip" href="#/discover?from=revisit">Second look</a>{/if}
-  {#if items.length && unseen.length}<button class="small" onclick={another}>Next shelf</button>{/if}
-  {#if thread?.key === KNOWN.key && suggestion}<a class="chip" href={link(suggestion)}>{suggestion.label}</a>{/if}
-  {#if thread?.key === KNOWN.key}<button class="small ghost" onclick={() => document.getElementById('ways')?.focus()}>Explore by era, place or interest</button>{/if}
+  <button class="chip" onclick={() => document.getElementById('ways')?.focus()}>Other ways in ↓</button>
 </div>
 
 {#if !data.ready || (loading && !items.length)}
@@ -357,7 +381,7 @@
               {#if own.status !== 'want' && own.qid && (own.rating ?? 0) >= 7}<a class="btn small" href={link({ key: `title:${own.qid}`, label: own.name })}>More like this</a>{/if}
               {#if line?.thread}<a class="btn small" href={link(line.thread)}>{line.thread.label}</a>{/if}
               <a class="btn small" href={titleHref(own.id)}>Open</a>
-              {#if here.has(own.id)}<button class="small ghost" onclick={() => undo(f)} disabled={busy[f.qid]}>Undo</button>{/if}
+              {#if canUndo(own)}<button class="small ghost" onclick={() => undo(f)} disabled={busy[f.qid]}>Undo</button>{/if}
             </div>
           {:else if no && !revisit}
             <div class="done row" role="status"><strong>Not for you.</strong> <button class="small ghost" onclick={() => undo(f)} disabled={busy[f.qid]}>Undo</button></div>
@@ -384,6 +408,7 @@
     {#if tally}<p class="small" role="status">This shelf: {tally}.</p>{/if}
     <div class="row">
       {#if unseen.length}<button class="primary" onclick={another}>Next shelf</button>
+        {#if tally}<a class="btn" href="#/taste">What this says about you</a>{/if}
       {:else}<p class="small muted">You’ve reached the end. Pick another route below or <button class="linkish" onclick={() => { shown = new Set(); void another(); }}>browse this one again</button>.</p>{/if}
     </div>
   </div>

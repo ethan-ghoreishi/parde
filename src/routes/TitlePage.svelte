@@ -220,7 +220,7 @@
             {#if !best}<a class="small" href="#sources" onclick={(e) => { e.preventDefault(); document.getElementById('sources')?.scrollIntoView(); }}>Add where you watch it ↓</a>{/if}
             <ProgressPicker titleId={t.id} label={prog.seenCount ? 'Seen up to' : 'Seen some already? Up to'} />
           {:else if t.kind === 'show' && epsQ.value.length}
-            <p>{finished ? 'You’ve finished the series.' : t.showStatus === 'Ended' ? 'You’ve reached the end of the available schedule. Check the episode list if anything is missing.' : 'There are no more dated episodes in this schedule.'}</p>
+            <p>{!prog.seenCount ? 'No episode has a date yet.' : t.showStatus !== 'Ended' ? 'You’re up to date: no more episodes have a date yet.' : finished || t.status === 'watched' ? 'You’ve finished the series.' : 'You’ve seen the last episode listed.'}</p>
             {#if t.status !== 'watched'}<button onclick={() => (logOpen = true)}>Log as finished</button>{/if}
             <ProgressPicker titleId={t.id} />
           {:else if t.kind === 'film'}

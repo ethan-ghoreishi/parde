@@ -1,7 +1,7 @@
 import { db, getSetting, now, setSetting, uid, USER_FIELDS, type Dismissed, type Episode, type Link, type Status, type Title } from './db';
 import { fetchShow, showUpdates, toEpisode } from './api/tvmaze';
 import { filmMeta, filmMetas, qidForImdb, wikidataMeta, type Meta } from './api/wiki';
-import { byOrder, completeSchedule, isAired, isListed, onCalendar, progress } from './schedule';
+import { byOrder, canMark, completeSchedule, isAired, isListed, onCalendar, progress } from './schedule';
 import { cleanUrl, replaceHost, hostOf } from './links';
 
 const defined = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
@@ -16,12 +16,13 @@ export function persistStorage() {
   navigator.storage?.persist?.().catch(() => {});
 }
 
-const stamps = (patch: Partial<Title>, at: string) => USER_FIELDS.filter((k) => k in patch).map((k) => [k, at] as const);
+/** What you set yourself, and only where it differs: leaving something blank that was blank is not clearing it. */
+const edits = (patch: Partial<Title>, cur: Partial<Title>) => USER_FIELDS.filter((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(cur[k]));
 
 function newTitle(id: string, meta: Meta, patch: Partial<Title> = {}): Title {
   const t = now();
   const row: Title = { id, ...meta, status: 'want', followed: meta.kind === 'show' ? true : undefined, addedAt: t, updatedAt: t, enrichedAt: t, ...(patch.status && patch.status !== 'want' ? { firstWatchedAt: t } : {}), ...patch };
-  return { ...row, edited: Object.fromEntries(stamps({ ...patch, status: row.status }, t)) };
+  return { ...row, edited: Object.fromEntries(edits({ ...patch, status: row.status }, {}).map((k) => [k, t])) };
 }
 
 // A second tap while the first is still looking things up joins it instead of adding twice.
@@ -110,13 +111,29 @@ async function saveEpisodes(titleId: string, raw: Parameters<typeof toEpisode>[1
   const listed = new Set(eps.map((e) => e.id));
   if (listed.size !== eps.length || (await db.episodes.bulkGet([...listed])).some((e) => e && e.titleId !== titleId)) throw new Error('TVmaze returned conflicting episode IDs. Your schedule was kept.');
   const missing = old.filter((e) => !listed.has(e.id) && !e.missingSince);
-  // A reused season/episode number does not establish that two different episode IDs are the same.
   await db.episodes.bulkPut([...missing.map((e) => ({ ...e, missingSince: now() })), ...eps]);
+  await carryMarks(titleId, new Set(old.filter((e) => !e.missingSince).map((e) => e.id)));
+}
+
+/**
+ * TVmaze sometimes lists an episode again under a new id. New, in the same place, with the same date and name, it is
+ * the same episode, and its mark goes with it. One that was already `known` beside it is another, renumbered.
+ */
+export async function carryMarks(titleId: string, known: Set<number>) {
+  const eps = await episodesOf(titleId);
+  const have = await seenOf(titleId);
+  for (const gone of eps.filter((e) => e.missingSince && have.has(e.id))) {
+    const same = eps.find((e) => !e.missingSince && !known.has(e.id) && byOrder(e, gone) === 0 && !!e.airdate && e.airdate === gone.airdate && e.name === gone.name);
+    if (!same || (!have.has(same.id) && (await db.removed.get(`seen:${same.id}`)))) continue;
+    if (!have.has(same.id)) await db.seen.put({ ...(await db.seen.get(gone.id))!, episodeId: same.id });
+    await db.seen.delete(gone.id);
+    have.add(same.id);
+  }
 }
 
 export type InitialProgress = 'all' | { season: number; episode: number };
 
-export async function storeShow(tvmaze: number, patch: Partial<Title> = {}, initial?: InitialProgress) {
+export async function storeShow(tvmaze: number, { finishedAt, ...patch }: Partial<Title> = {}, initial?: InitialProgress) {
   const id = `tvm:${tvmaze}`;
   if (await db.titles.get(id)) return { id, added: false, needsProgress: false };
   const { meta, episodes } = await fetchShow(tvmaze);
@@ -135,6 +152,8 @@ export async function storeShow(tvmaze: number, patch: Partial<Title> = {}, init
       await mark(id, selected, true);
       await reconcile(id);
     }
+    // A date is when you finished it: one still running, or only part seen, has none yet.
+    if (finishedAt && (await db.titles.get(id))?.status === 'watched') await update(id, { finishedAt });
     return { id, added: true, needsProgress: !!initial && !selected.length };
   });
   persistStorage();
@@ -147,7 +166,7 @@ export const addShow = async (tvmaze: number, patch: Partial<Title> = {}, initia
 export function dismissTitle(item: Dismissed) {
   return db.transaction('rw', db.dismissed, db.removed, db.titles, async () => {
     if (await db.titles.where('qid').equals(item.qid).count() || (item.tvmaze && await db.titles.get(`tvm:${item.tvmaze}`))) throw new Error('This title is already in your library.');
-    await db.dismissed.put({ ...item, measured: true });
+    await db.dismissed.put(item);
     await db.removed.delete(`dismissed:${item.qid}`);
   });
 }
@@ -171,7 +190,7 @@ export async function refreshTitle(t: Title, deep = false) {
     const kept = { ...meta, ...pickWd(t), critics: [...meta.critics, ...t.critics.filter((c) => c.source !== 'TVmaze')] };
     // A failed (or suddenly empty) Wikidata lookup keeps the people, subjects and scores found before.
     const full = enriched?.qid && (!t.qid || enriched.qid === t.qid) ? enriched : kept;
-    await db.transaction('rw', db.titles, db.episodes, db.seen, async () => {
+    await db.transaction('rw', db.titles, db.episodes, db.seen, db.removed, async () => {
       const cur = await db.titles.get(t.id);
       if (!cur || cur.addedAt !== t.addedAt || (cur.tvmUpdated ?? 0) > (meta.tvmUpdated ?? 0) ||
         ((cur.syncedAt ?? '') > started && (cur.tvmUpdated ?? 0) >= (meta.tvmUpdated ?? 0))) return;
@@ -203,10 +222,12 @@ const DAY = 864e5;
 /** Film details (scores above all) go stale: in the background, the 20 oldest over a month, twice a day at most. */
 export async function refreshFilms() {
   const last = await getSetting<string>('filmsSyncedAt', '');
-  if (last && Date.now() - Date.parse(last) < DAY / 2) return;
+  const films = (await db.titles.where('kind').equals('film').toArray()).filter((t) => t.qid);
+  // Saved from a shelf before its details arrived: those come now, not in half a day.
+  if (last && Date.now() - Date.parse(last) < DAY / 2 && films.every((t) => t.enrichedAt)) return;
   const old = new Date(Date.now() - 30 * DAY).toISOString();
-  const stale = (await db.titles.where('kind').equals('film').toArray())
-    .filter((t) => t.qid && (t.enrichedAt ?? '') < old)
+  const stale = films
+    .filter((t) => (t.enrichedAt ?? '') < old)
     .sort((a, b) => (a.enrichedAt ?? '').localeCompare(b.enrichedAt ?? ''))
     .slice(0, 20);
   if (!stale.length) return;
@@ -215,6 +236,7 @@ export async function refreshFilms() {
   for (const t of stale) {
     const m = metas.get(t.qid!);
     if (m) await saveFilmMeta(t.id, m, started, t.addedAt);
+    else await db.titles.update(t.id, { enrichedAt: started }); // not on Wikidata any more: keep ours, ask again next month
   }
   await setSetting('filmsSyncedAt', started);
 }
@@ -246,24 +268,24 @@ export function syncShows(force = false): Promise<{ refreshed: number; failed: n
 
 async function runSync(force: boolean): Promise<{ refreshed: number; failed: number }> {
   const last = await getSetting<string>('showsSyncedAt', '');
-  const age = last ? Date.now() - Date.parse(last) : Infinity;
-  if (!force && age < 6 * 3600e3) return { refreshed: 0, failed: 0 };
+  if (!force && last && Date.now() - Date.parse(last) < 6 * 3600e3) return { refreshed: 0, failed: 0 };
   const over = (t: Title) => t.status === 'watched' && t.showStatus === 'Ended';
-  // A finished, ended show is refetched only when TVmaze says it changed: it may be coming back.
   const shows = (await db.titles.where('kind').equals('show').toArray()).filter(
     (t) => t.tvmaze && t.status !== 'dropped' && (t.followed || t.status !== 'want'),
   );
   if (!shows.length) return { refreshed: 0, failed: 0 };
-  const changed = !force && age < 28 * DAY ? await showUpdates(age < DAY ? 'day' : age < 6 * DAY ? 'week' : 'month').catch(() => null) : null;
+  // A month of changes is 30 KB, and every show is refetched within a month anyway: between them nothing is missed.
+  const changed = await showUpdates('month').catch(() => null);
   let refreshed = 0;
   let failed = 0;
-  let fallbackEnded = 0;
+  let endedChecked = 0;
   for (const t of shows.sort((a, b) => (a.syncedAt ?? '').localeCompare(b.syncedAt ?? ''))) {
-    const stamp = changed?.[String(t.tvmaze)];
     const stale = Date.now() - Date.parse(t.syncedAt ?? t.addedAt) > (over(t) ? 28 : 2) * DAY;
-    const hasUpdate = !!stamp && stamp > (t.tvmUpdated ?? 0);
-    if (!force && !stale && t.tvmUpdated && !hasUpdate) continue;
-    if (!hasUpdate && over(t) && fallbackEnded++ >= 12) continue;
+    const hasUpdate = (changed?.[String(t.tvmaze)] ?? 0) > (t.tvmUpdated ?? 0);
+    // Finished and over: only when TVmaze says it changed (it may be coming back), or it has been a month.
+    if (!(hasUpdate || stale || !t.tvmUpdated || (force && (!over(t) || !changed)))) continue;
+    // In the background the old ones take turns; asked for, all are checked.
+    if (!force && over(t) && !hasUpdate && endedChecked++ >= 12) continue;
     try {
       await refreshTitle(t);
       refreshed++;
@@ -274,33 +296,40 @@ async function runSync(force: boolean): Promise<{ refreshed: number; failed: num
   }
   // Record the attempt even if some shows failed (offline, show removed upstream): otherwise every
   // tab focus would refetch everything. Failures are retried within the hour.
-  await setSetting('showsSyncedAt', failed ? new Date(Date.now() - 5 * 3600e3).toISOString() : now());
+  await setSetting('showsSyncedAt', failed || !changed ? new Date(Date.now() - 5 * 3600e3).toISOString() : now());
   return { refreshed, failed };
 }
 
 /** Save something you set. Each such field remembers when, so a merge can keep the newer edit. */
 export async function update(id: string, patch: Partial<Title>) {
-  const at = now();
-  const n = await db.titles.update(id, { ...patch, ...Object.fromEntries(stamps(patch, at).map(([k, v]) => [`edited.${k}`, v])), updatedAt: at } as Partial<Title>);
-  if (!n) throw new Error(GONE);
+  await db.transaction('rw', db.titles, async () => {
+    const cur = await db.titles.get(id);
+    if (!cur) throw new Error(GONE);
+    const at = now();
+    await db.titles.update(id, { ...patch, ...Object.fromEntries(edits(patch, cur).map((k) => [`edited.${k}`, at])), updatedAt: at } as Partial<Title>);
+  });
 }
 
 const GONE = 'This title is no longer in your library.';
 const marksOf = (titleId: string) => db.seen.where('titleId').equals(titleId).toArray();
+
+const stamp = (t: Title, k: string) => (t.edited as Record<string, string> | undefined)?.[k];
 
 /**
  * Run a change to one title's status and episode marks as one unit: all of it is saved, or none. The undo
  * reverts only what the change did, and only where nothing has touched it since.
  */
 function undoable(titleId: string, change: (t: Title) => Promise<void>): Promise<Undo> {
-  const tables = [db.titles, db.episodes, db.seen, db.removed];
+  const tables = [db.titles, db.episodes, db.seen, db.watches, db.removed];
   return db.transaction('rw', tables, async () => {
     const t0 = await db.titles.get(titleId);
     if (!t0) throw new Error(GONE);
     const m0 = new Map((await marksOf(titleId)).map((m) => [m.episodeId, m]));
     await change(t0);
-    const t1 = (await db.titles.get(titleId))!;
     const m1 = new Map((await marksOf(titleId)).map((m) => [m.episodeId, m]));
+    // A finish date that came from marking an episode goes with that mark.
+    if (t0.finishedAt && (await db.titles.get(titleId))!.status !== 'watched' && [...m0.values()].some((m) => m.seenAt === t0.finishedAt && !m1.has(m.episodeId))) await update(titleId, { finishedAt: undefined });
+    const t1 = (await db.titles.get(titleId))!;
     const deleted = new Map((await db.removed.bulkGet([...m0.keys()].map((id) => `seen:${id}`))).flatMap((x) => x ? [[x.key, x.at]] : []));
     return () =>
       db.transaction('rw', tables, async () => {
@@ -313,7 +342,7 @@ function undoable(titleId: string, change: (t: Title) => Promise<void>): Promise
           await db.seen.put(m);
           await db.removed.delete(key);
         }
-        const back = (['status', 'followed', 'finishedAt'] as const).filter((k) => t0[k] !== t1[k] && cur[k] === t1[k] && cur.edited?.[k] === t1.edited?.[k]);
+        const back = (['status', 'followed', 'finishedAt', 'firstWatchedAt', 'hindsight'] as const).filter((k) => t0[k] !== t1[k] && cur[k] === t1[k] && stamp(cur, k) === stamp(t1, k));
         if (back.length) await update(titleId, Object.fromEntries(back.map((k) => [k, t0[k]])));
       });
   });
@@ -323,6 +352,9 @@ export const setStatus = (t: Pick<Title, 'id'>, status: Status) =>
   undoable(t.id, async (cur) => {
     const patch: Partial<Title> = { status };
     if (status === 'watched' && !cur.firstWatchedAt) patch.firstWatchedAt = now();
+    // Put straight back with nothing recorded about seeing it: a slip of the finger, not a viewing.
+    if (status === 'want' && cur.firstWatchedAt && Date.now() - Date.parse(cur.firstWatchedAt) < DAY && !cur.finishedAt && cur.rating === undefined &&
+      !(await marksOf(t.id)).length && !(await db.watches.where('titleId').equals(t.id).count())) Object.assign(patch, { firstWatchedAt: undefined, hindsight: undefined });
     // Earlier versions took a dropped show off the calendar: picking it up again puts it back, unless you took it off.
     if (cur.status === 'dropped' && status !== 'dropped' && cur.followed === false && !cur.edited?.followed) patch.followed = true;
     // "Finished" means every episode that is out has been seen; keep the marks in step with it.
@@ -335,7 +367,7 @@ export function setExpectation(id: string, v: number | undefined) {
   return db.transaction('rw', db.titles, async () => {
     const t = await db.titles.get(id);
     if (!t || t.status !== 'want' || t.rating !== undefined || t.finishedAt || t.firstWatchedAt) throw new Error('Pre-watch instinct can only be recorded before starting.');
-    await update(id, { expectation: v, expectedAt: v ? now() : undefined, instinctRecorded: !!v });
+    await update(id, { expectation: v, expectedAt: v ? now() : undefined });
   });
 }
 
@@ -345,6 +377,20 @@ export function sawScores(t: Pick<Title, 'id'>) {
     if (cur?.status === 'want' && !cur.scoresAt && cur.rating === undefined && !cur.firstWatchedAt) await db.titles.update(t.id, { scoresAt: now() });
   });
 }
+
+/** The scores of something not in your library were opened: whatever you choose about it from now on comes after. */
+export const sawScoresOf = (qid: string) =>
+  db.transaction('rw', db.settings, async () => {
+    const seen = await getSetting<Record<string, string>>('scoresSeen', {});
+    if (!seen[qid]) await setSetting('scoresSeen', Object.fromEntries([...Object.entries(seen), [qid, now()]].slice(-500)));
+  });
+
+/** What you have moved on from, thread by thread, so the next visit carries on from there. */
+export const rememberShelf = (thread: string, shown: string[]) =>
+  db.transaction('rw', db.settings, async () => {
+    const { [thread]: _, ...rest } = await getSetting<Record<string, string[]>>('browsed', {});
+    await setSetting('browsed', Object.fromEntries([...Object.entries(rest), [thread, shown]].slice(-40)));
+  });
 
 /** Two quick taps both count: the list is read and written in one step, not from what was on screen. */
 export async function changeThemes(id: string, change: (themes: string[]) => string[]) {
@@ -375,11 +421,11 @@ export async function logWatch(t: Pick<Title, 'id'>, opts: { date: string; toget
   await db.transaction('rw', db.titles, db.watches, db.episodes, db.seen, db.removed, async () => {
     const cur = await db.titles.get(t.id);
     if (!cur) throw new Error(GONE);
-    if (cur.kind === 'show') await mark(t.id, await episodesOf(t.id), true);
+    if (cur.kind === 'show') await mark(t.id, (await episodesOf(t.id)).filter((e) => isAired(e)), true);
     await db.watches.add({ id: uid(), titleId: t.id, date: opts.date, together: opts.together });
     // finishedAt is the latest viewing: logging an older one does not move it back.
     const latest = !cur.finishedAt || opts.date >= cur.finishedAt.slice(0, 10) ? opts.date : cur.finishedAt;
-    const patch: Partial<Title> = { status: 'watched', finishedAt: latest, rating: opts.rating, firstWatchedAt: [cur.firstWatchedAt, opts.date].filter(Boolean).sort()[0] };
+    const patch: Partial<Title> = { status: 'watched', finishedAt: latest, rating: opts.rating, firstWatchedAt: [cur.firstWatchedAt, opts.date].filter((x) => !!x).sort()[0] };
     if (opts.together) patch.partnerRating = opts.partnerRating;
     if (opts.themes) patch.themes = opts.themes.length ? opts.themes : undefined;
     await update(t.id, patch);
@@ -460,17 +506,17 @@ export async function reconcile(titleId: string, byUser = true, o: { unmarked?: 
     // your decision: leave it
   } else if (t.status === 'watched' && p.next && (byUser || (p.lastSeen && isAired(p.next) && onCalendar(t)))) {
     if (!p.lastSeen || isAired(p.next)) patch = { status: 'watching' };
-  } else if (p.lastSeen && !p.next && p.seenCount === p.total && completeSchedule(t, eps) && (marked || (o.justEnded && t.status === 'watching' && !p.unlisted))) {
+  } else if (p.lastSeen && !p.next && completeSchedule(t, eps) && (marked || (o.justEnded && t.status === 'watching' && !p.unlisted))) {
     if (t.status !== 'watched') {
       const last = await db.seen.get(p.lastSeen.id);
-      patch = { status: 'watched', finishedAt: t.finishedAt ?? (last?.bulk ? undefined : last?.seenAt) };
+      patch = { status: 'watched', ...(t.finishedAt || !last || last.bulk ? {} : { finishedAt: last.seenAt }) };
     }
   } else if (marked && p.lastSeen && (t.status === 'want' || t.status === 'paused')) {
     patch = { status: 'watching' };
   }
   if (marked && p.lastSeen && !t.firstWatchedAt) {
     const first = await db.seen.get(p.lastSeen.id);
-    patch = { ...patch, firstWatchedAt: now(), ...(first?.bulk ? { instinctRecorded: false } : {}) };
+    patch = { ...patch, firstWatchedAt: now(), ...(first?.bulk ? { hindsight: true } : {}) };
   }
   if (byUser && patch) await update(titleId, patch);
   else if (!byUser && patch) await db.titles.update(titleId, patch); // not an edit of yours: no edit time
@@ -489,7 +535,8 @@ async function mark(titleId: string, eps: Pick<Episode, 'id'>[], bulk = false) {
   const have = await seenOf(titleId);
   const stored = await db.episodes.bulkGet(eps.map((e) => e.id));
   const seenAt = now();
-  const add = stored.filter((e): e is Episode => !!e && e.titleId === titleId && !e.missingSince && isAired(e) && !have.has(e.id));
+  // Never one still to come. One without any date, before where you are, is not to come.
+  const add = stored.filter((e): e is Episode => !!e && e.titleId === titleId && !e.missingSince && (!e.airdate || isAired(e)) && !have.has(e.id));
   await db.seen.bulkPut(add.map((e) => ({ episodeId: e.id, titleId, seenAt, ...(bulk ? { bulk } : {}) })));
   await db.removed.bulkDelete(add.map((e) => `seen:${e.id}`));
 }
@@ -503,8 +550,8 @@ async function unmark(titleId: string, ids: number[]) {
 }
 
 export const setSeen = (ep: Episode, on: boolean) =>
-  undoable(ep.titleId, async () => {
-    if (on && !(await db.episodes.get(ep.id).then((e) => e && !e.missingSince && isAired(e)))) throw new Error('This episode is not confirmed as released.');
+  undoable(ep.titleId, async (t) => {
+    if (on && !(await db.episodes.get(ep.id).then((e) => e && canMark(t, e)))) throw new Error('This episode is not out yet.');
     await (on ? mark(ep.titleId, [ep]) : unmark(ep.titleId, [ep.id]));
     await reconcile(ep.titleId, true, { unmarked: !on });
   });
@@ -523,7 +570,7 @@ export const seenUpTo = (ep: Episode) =>
   undoable(ep.titleId, async () => {
     const eps = await episodesOf(ep.titleId);
     const target = eps.find((e) => e.id === ep.id && byOrder(e, ep) === 0 && !e.missingSince && isAired(e));
-    if (!target) throw new Error('This episode changed or is not released.');
+    if (!target) throw new Error('This episode has moved or is not out yet. Check the list and try again.');
     await mark(ep.titleId, eps.filter((e) => byOrder(e, target) <= 0), true);
     await reconcile(ep.titleId);
   });
@@ -541,8 +588,8 @@ export const setProgress = (titleId: string, ep: Episode | null) =>
     const eps = await episodesOf(titleId);
     const have = await seenOf(titleId);
     const target = ep && eps.find((e) => e.id === ep.id && byOrder(e, ep) === 0 && !e.missingSince && isAired(e));
-    if (ep && !target) throw new Error('This episode changed or is not released. Choose your position again.');
-    const upTo = new Set(target ? eps.filter((e) => byOrder(e, target) <= 0 && isListed(e, have) && (isAired(e) || have.has(e.id))).map((e) => e.id) : []);
+    if (ep && !target) throw new Error('This episode has moved or is not out yet. Choose again.');
+    const upTo = new Set(target ? eps.filter((e) => byOrder(e, target) <= 0 && isListed(e, have) && (!e.airdate || isAired(e) || have.has(e.id))).map((e) => e.id) : []);
     // Marks you already had keep their dates; marks for episodes no longer stored are left alone.
     await unmark(titleId, eps.filter((e) => !e.missingSince && !upTo.has(e.id)).map((e) => e.id));
     await mark(titleId, eps.filter((e) => upTo.has(e.id)), true);

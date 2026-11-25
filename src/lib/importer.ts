@@ -1,4 +1,4 @@
-import { db, type Episode, type Kind, type Title } from './db';
+import { db, now, type Episode, type Kind, type Title } from './db';
 import { FILM_TYPES, SHOW_TYPES, lit, rankHits, searchFilms, sparql as query, splitYear } from './api/wiki';
 import { searchShows, showForImdb, findShow } from './api/tvmaze';
 import { addFilms, storeShow, update, setProgress } from './actions';
@@ -338,9 +338,10 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
       it.error = errorText(e);
     }
     if (it.candidates.length === 1 && agrees && found.length <= 1) Object.assign(it, { pick: 0, sure: true });
-    if (!it.candidates.length && !it.error) it.error = unchecked ? 'IMDb ID could not be checked. Try again.' : 'No verified match for this IMDb ID';
-    tick();
+    if (!it.candidates.length && !it.error && unchecked) it.error = 'Its IMDb id could not be checked.';
+    if (it.candidates.length || it.error) tick();
   }
+  const byId = new Set(imdbRows.filter((it) => it.candidates.length));
 
   const named = items.filter((it) => !it.candidates.length && !it.error && it.row.name);
   const labels = named.length ? await byLabel([...new Set(named.map((it) => it.row.name))]).catch(() => undefined) : undefined;
@@ -348,13 +349,13 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
     const c = labels?.get(it.row.name);
     if (c?.length) {
       const { wrongKind: _, ...best } = choose(it.row, c);
-      Object.assign(it, best);
+      Object.assign(it, best, it.row.imdb && { sure: false, pick: -1 }); // an id nobody lists: the title alone may be another film
       if (it.sure) tick();
     }
   }
 
   for (const it of items) {
-    if (it.sure || it.error || it.row.imdb && it.candidates.length) continue;
+    if (it.sure || it.error || byId.has(it)) continue;
     if (it.row.name) {
       try {
         const { found, complete } = await bySearch(it.row);
@@ -365,7 +366,7 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
         // Search finds look-alikes ("Heat" → "The Heat"): a hit is added without asking only when its title is
         // exactly the one given, of the kind asked for, the year agrees, and nothing else fits as well.
         const fits = best.candidates.filter((c) => same(c) && (!it.row.year || c.year === it.row.year));
-        const exact = complete && !wrongKind && fits.length === 1 && fits[0] === top;
+        const exact = complete && !wrongKind && !it.row.imdb && fits.length === 1 && fits[0] === top;
         Object.assign(it, { ...best, sure: exact, pick: exact ? 0 : -1 });
       } catch (e) {
         if (!it.candidates.length) it.error = errorText(e);
@@ -410,6 +411,8 @@ export function patchFor(row: Row, existing?: Title): Partial<Title> {
   if (!existing || (upgrade && !existing?.edited?.finishedAt)) {
     p.status = row.status;
     if (row.status === 'watched' && row.watchedOn && !existing?.finishedAt) p.finishedAt = row.watchedOn;
+    // Without its date, it may have been seen before anything you said about it here.
+    if (upgrade) Object.assign(p, { firstWatchedAt: row.watchedOn ?? now() }, !row.watchedOn && { hindsight: true });
   }
   return p;
 }
@@ -459,7 +462,7 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
   let done = 0;
   const tick = (n = 1) => progress((done += n), chosen.length);
 
-  const fill = (id: string, row: Row) => db.transaction('rw', db.titles, db.episodes, db.seen, db.removed, async () => {
+  const fill = (id: string, row: Row) => db.transaction('rw', db.titles, db.episodes, db.seen, db.watches, db.removed, async () => {
     const t = await db.titles.get(id);
     if (!t) throw new Error('This title was removed while importing.');
     const p = patchFor(row, t);
@@ -471,10 +474,12 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
     const eps = await db.episodes.where('titleId').equals(id).toArray();
     const here = whereIn(eps, new Set(await db.seen.where('titleId').equals(id).primaryKeys())).lastSeen;
     const at = episodeAt(eps, row);
-    if (!here && at && !t.firstWatchedAt && t.status === 'want' && !(await db.removed.where('key').startsWith('seen:').and((x) => eps.some((e) => x.key === `seen:${e.id}`)).count())) {
+    // Marks you took away were your decision: then it is asked, not set.
+    const cleared = !here && (await db.removed.bulkGet(eps.map((e) => `seen:${e.id}`))).some((x) => !!x);
+    if (!here && at && !cleared && (t.status === 'want' || t.status === 'watching')) {
       await setProgress(id, at);
       out.updated++;
-    } else if (!here && t.status === 'want') out.toPlace.push(id);
+    } else if (!here && t.status !== 'watched' && t.status !== 'dropped') out.toPlace.push(id);
     else if (here && at && byOrder(at, here) > 0) out.ahead.push({ id, name: t.name, here: code(here), ep: at });
   });
 
@@ -520,7 +525,7 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
       const p = patchFor(row);
       const initial = row.upTo ?? (row.status === 'watched' && !partly ? 'all' : undefined);
       const result = await storeShow(tvm, {
-        ...p, ...(m.qid ? { qid: m.qid } : {}), ...(row.status === 'watched' ? { status: 'watching', finishedAt: undefined } : {}),
+        ...p, ...(m.qid ? { qid: m.qid } : {}), ...(row.status === 'watched' ? { status: 'watching', finishedAt: initial === 'all' ? p.finishedAt : undefined } : {}),
       }, initial);
       if (!result.added) await fill(result.id, row);
       else {

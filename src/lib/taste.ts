@@ -1,7 +1,9 @@
 import type { CriticScore, Dismissed, Episode, Title } from './db';
+import { dayKey } from './schedule';
 
 export const EXPECTATIONS = ['', 'Not for us', 'Unsure', 'Curious', 'Keen', 'Must see'] as const;
 
+const DAY = 864e5;
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
 
 export function pearson(pairs: [number, number][]): number {
@@ -182,10 +184,19 @@ export interface Gap {
   ref: string;
 }
 
-/** Require a pre-watch entry from a version that actually enforced it. A same-day diary date is ambiguous. */
-export const beforeWatching = (t: Title) => !!(t.instinctRecorded && t.expectedAt && t.firstWatchedAt && t.expectedAt < t.firstWatchedAt);
+/**
+ * A prediction, not hindsight: said no later than the day you first saw it (the trailer before dinner, the film
+ * after it), while Parde still had it down as unseen. Without a date to compare, or where the first viewing may be
+ * older than Parde knows, it proves nothing either way.
+ */
+export const beforeWatching = (t: Title) => {
+  const seen = [t.firstWatchedAt, t.finishedAt].filter((x) => !!x).sort()[0];
+  if (!t.expectedAt || !seen || t.hindsight) return false;
+  return seen.length > 10 ? t.expectedAt < seen : dayKey(new Date(t.expectedAt)) <= seen;
+};
 
-export const blindExpectation = (t: Title) => t.instinctRecorded && t.expectedAt ? !t.scoresAt || t.scoresAt > t.expectedAt : undefined;
+/** Whether you said it before Parde had shown you its scores: undefined from before that was kept track of. */
+export const blindExpectation = (t: Title) => (t.edited?.expectation && t.expectedAt ? !t.scoresAt || t.scoresAt > t.expectedAt : undefined);
 
 /** Expectation 1–5 against enjoyment 1–10, in plain counts against your own average. */
 export function trailerInstinct(titles: Title[]) {
@@ -197,6 +208,8 @@ export function trailerInstinct(titles: Title[]) {
   const unsure = pairs.filter((t) => t.expectation! <= 2);
   return {
     n: pairs.length,
+    /** Rated, with a keenness that cannot be shown to come first */
+    uncounted: titles.filter((t) => t.expectation && t.rating !== undefined).length - pairs.length,
     r: spearman(pairs.map((t) => [t.expectation!, t.rating!])),
     keen: { n: keen.length, above: keen.filter((t) => t.rating! > avg).length },
     unsure: { n: unsure.length, above: unsure.filter((t) => t.rating! > avg).length },
@@ -267,47 +280,60 @@ export function scoreBands(titles: Title[], dismissed: Dismissed[]): Band[] {
   }
   // A title you passed over and then added anyway was wanted in the end: counted there, not twice.
   const wanted = new Set(titles.map((t) => t.qid));
-  for (const d of dismissed) if (d.measured && !wanted.has(d.qid)) choose(tomatometer(d.critics), false, d.at, d.scoresAt);
+  for (const d of dismissed) if (!wanted.has(d.qid)) choose(tomatometer(d.critics), false, d.at, d.scoresAt);
   return bands.map(({ min: _, ...b }) => b);
 }
 
-const ruleNames = [
-  'Critics and audience both under 60%',
-  'Critics under 60% and audience at least 70%',
-  'Critics over 80% and audience under 70%',
-  'IMDb 5.5–6.5',
-  'IMDb over 7.5 and critics over 80%',
+export interface ScoreRule {
+  label: string;
+  /** Rests on audience scores, which hardly any open source publishes */
+  audience?: boolean;
+  /** Rated titles that fit, and your ratings of those with the same kinds of score that do not */
+  fit: Title[];
+  rest: number[];
+  /** Discover choices about titles that fit, made with the scores open: only those can show the rule at work */
+  knowing: Tally;
+}
+
+const RULES: Pick<ScoreRule, 'label' | 'audience'>[] = [
+  { label: 'Critics and audience both under 60%', audience: true },
+  { label: 'Critics under 60%, audience 70% or more', audience: true },
+  { label: 'Critics over 80%, audience under 70%', audience: true },
+  { label: 'IMDb around 6 (5.5–6.5)' },
+  { label: 'IMDb over 7.5 and critics over 80%' },
 ];
 
-/** Find real cases to inspect. The two scores in a pair must have been reported within a year. */
-export function scoreCases(titles: Title[], dismissed: Dismissed[]) {
-  const cases = ruleNames.map((label) => ({ label, liked: [] as Title[], chosen: { yes: 0, n: 0 } }));
-  const eligible = (scores: CriticScore[]) => {
-    const critic = scores.find((c) => c.source === 'Rotten Tomatoes');
-    const audience = scores.find((c) => c.source === 'Rotten Tomatoes audience');
-    const imdb = scores.find((c) => c.source === 'IMDb');
-    const paired = (other?: CriticScore) => critic?.asOf && other?.asOf &&
-      Math.abs(Date.parse(critic.asOf) - Date.parse(other.asOf)) <= 366 * 864e5;
-    const high = critic && critic.score > 80;
-    return [
-      critic && critic.score < 60 && paired(audience) && audience!.score < 60,
-      critic && critic.score < 60 && paired(audience) && audience!.score >= 70,
-      high && paired(audience) && audience!.score < 70,
-      imdb && imdb.score >= 55 && imdb.score <= 65,
-      high && paired(imdb) && imdb!.score > 75,
-    ];
+/** Two scores can be read together if taken within a year of each other, or both once the title was old enough to have settled. */
+function together(a: CriticScore | undefined, b: CriticScore | undefined, year?: number): boolean {
+  if (!a?.asOf || !b?.asOf) return false;
+  const settled = (c: CriticScore) => !!year && Number(c.asOf!.slice(0, 4)) >= year + 3;
+  return Math.abs(Date.parse(a.asOf) - Date.parse(b.asOf)) <= 366 * DAY || (settled(a) && settled(b));
+}
+
+/** For each rule of thumb: does it fit (true), not (false), or are the scores it needs missing (undefined)? */
+function ruleFits(scores: CriticScore[], year?: number): (boolean | undefined)[] {
+  const [c, a, i] = ['Rotten Tomatoes', 'Rotten Tomatoes audience', 'IMDb'].map((s) => scores.find((x) => x.source === s));
+  const pair = (x: CriticScore | undefined, test: (critics: number, other: number) => boolean) => (c && x && together(c, x, year) ? test(c.score, x.score) : undefined);
+  return [
+    pair(a, (critics, audience) => critics < 60 && audience < 60),
+    pair(a, (critics, audience) => critics < 60 && audience >= 70),
+    pair(a, (critics, audience) => critics > 80 && audience < 70),
+    i && i.score >= 55 && i.score <= 65,
+    pair(i, (critics, imdb) => critics > 80 && imdb > 75),
+  ];
+}
+
+export function scoreRules(titles: Title[], dismissed: Dismissed[]): ScoreRule[] {
+  const rules = RULES.map((r): ScoreRule => ({ ...r, fit: [], rest: [], knowing: { yes: 0, n: 0 } }));
+  for (const t of rated(titles)) ruleFits(t.critics, t.year).forEach((fits, i) => fits ? rules[i].fit.push(t) : fits === false && rules[i].rest.push(t.rating!));
+  const choice = (scores: CriticScore[] | undefined, year: number | undefined, yes: boolean, at?: string, scoresAt?: string) => {
+    if (!scores || !at || !scoresAt || scoresAt > at) return;
+    ruleFits(scores, year).forEach((fits, i) => { if (fits) (rules[i].knowing.n++, (rules[i].knowing.yes += yes ? 1 : 0)); });
   };
-  for (const t of rated(titles)) eligible(t.critics).forEach((fits, i) => { if (fits) cases[i].liked.push(t); });
-  const count = (scores: CriticScore[], yes: boolean) => eligible(scores).forEach((fits, i) => {
-    if (fits) {
-      cases[i].chosen.n++;
-      if (yes) cases[i].chosen.yes++;
-    }
-  });
-  for (const t of titles) if (t.choiceScores && t.chosenAt) count(t.choiceScores, true);
-  const have = new Set(titles.map((t) => t.qid));
-  for (const d of dismissed) if (d.measured && !have.has(d.qid)) count(d.critics ?? [], false);
-  return cases;
+  for (const t of titles) choice(t.choiceScores, t.year, true, t.chosenAt, t.scoresAt);
+  const wanted = new Set(titles.map((t) => t.qid));
+  for (const d of dismissed) if (!wanted.has(d.qid)) choice(d.critics, d.year, false, d.at, d.scoresAt);
+  return rules;
 }
 
 /** Whether two groups of your ratings differ by more than chance. Under five in either, there is nothing to say. */

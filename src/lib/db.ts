@@ -56,6 +56,7 @@ export interface Title {
   /** TVmaze: Running, Ended, To Be Determined, In Development */
   showStatus?: string;
   endedOn?: string;
+  /** TVmaze: episodes in each season, when it gives every one of them */
   episodeOrders?: number[];
   /** TVmaze `updated` stamp, to skip refetching unchanged shows */
   tvmUpdated?: number;
@@ -76,9 +77,12 @@ export interface Title {
   /** Discover: when you chose to want it, and when Parde first showed you its scores before you had seen it */
   chosenAt?: string;
   scoresAt?: string;
+  /** The scores as they stood when you chose, so later ones cannot rewrite the choice */
   choiceScores?: CriticScore[];
+  /** When Parde first knew you had seen any of it: the viewing's date if it has one, else when you said so */
   firstWatchedAt?: string;
-  instinctRecorded?: boolean;
+  /** That first viewing may be older than Parde knows (marked in bulk, or imported): keenness before it proves nothing */
+  hindsight?: boolean;
   /** What drew you to it (Discover, optional) */
   drawn?: string[];
   /** When you last changed each of these yourself, clearing included, so a merge keeps the newer edit */
@@ -131,6 +135,7 @@ export interface Link {
   url: string;
   label?: string;
   broken?: boolean;
+  /** "season:episode" this reusable source failed for; it stays available for the others */
   failedEpisodes?: string[];
   editedAt?: string;
   addedAt: string;
@@ -151,13 +156,12 @@ export interface Dismissed {
   critics?: CriticScore[];
   kind?: Kind;
   tvmaze?: number;
-  measured?: boolean;
   scoresAt?: string;
 }
 
 /** Something you removed or unmarked, so merging an older backup does not bring it back. */
 export interface Removed {
-  /** 'title:wd:Q1' · 'seen:123' · 'link:<id>' · 'watch:<id>' */
+  /** 'title:wd:Q1' · 'seen:123' · 'link:<id>' · 'watch:<id>' · 'dismissed:Q1' */
   key: string;
   at: string;
 }

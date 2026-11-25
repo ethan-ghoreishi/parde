@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Episode, Link, Title } from '../lib/db';
-  import { code, isAired, isListed, localDay, localTime } from '../lib/schedule';
+  import { canMark, code, isAired, isListed, localDay, localTime } from '../lib/schedule';
   import { setSeen, seenUpTo, setSeasonSeen, type Undo } from '../lib/actions';
   import { formatDay } from '../lib/format';
   import { toast, undoable, errorText } from '../lib/ui.svelte';
@@ -67,12 +67,12 @@
             {@const aired = isAired(e)}
             <li class:on class:next={focus?.id === e.id}>
               <div class="ep">
-                <input type="checkbox" checked={on} onchange={(ev) => check(e, ev.currentTarget)} aria-label="Seen {code(e)}" />
+                <input type="checkbox" checked={on} disabled={!on && !canMark(title, e)} onchange={(ev) => check(e, ev.currentTarget)} aria-label="Seen {code(e)}" />
                 <button class="ghost line" onclick={() => (expanded = expanded === e.id ? null : e.id)} aria-expanded={expanded === e.id}>
                   <span class="code">{code(e)}</span>
                   <span class="name">{e.name}</span>
                   <span class="muted small when">
-                    {#if e.airdate}{aired ? '' : 'Coming '}{formatDay(localDay(e))}{localTime(e) && !aired ? ` · ${localTime(e)}` : ''}{:else}Date to be announced{/if}{#if e.missingSince} · no longer listed{/if}
+                    {#if e.airdate}{aired ? '' : 'Coming '}{formatDay(localDay(e))}{localTime(e) && !aired ? ` · ${localTime(e)}` : ''}{:else}{title.showStatus === 'Ended' ? 'No date' : 'Date to be announced'}{/if}{#if e.missingSince} · no longer listed{/if}
                   </span>
                 </button>
               </div>

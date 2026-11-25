@@ -8,6 +8,7 @@
   import { DEFAULT_SITES, validSite, type Site } from '../lib/sites';
   import { formatDay, ago } from '../lib/format';
   import { toast, errorText } from '../lib/ui.svelte';
+  import { forgetShelves } from './Discover.svelte';
 
   const data = live(
     () => async () => ({
@@ -57,9 +58,9 @@
     const parts = [
       r.added && `${n(r.added, 'title')} added`, r.updated && `${n(r.updated, 'title')} updated`, r.marks && `${n(r.marks, 'episode')} marked seen`,
       r.links && `${n(r.links, 'source')} added`, r.linkEdits && `${n(r.linkEdits, 'source')} updated`,
-      r.recovered && `${n(r.recovered, 'other record')} recovered`, r.watches && `${n(r.watches, 'viewing')} added`,
+      r.watches && `${n(r.watches, 'viewing')} added`, r.passes && `${n(r.passes, 'passed title')} added`,
     ].filter(Boolean);
-    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'record')} skipped because of a deletion or conflict.` : ''}`;
+    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'thing')} you removed here since ${r.leftOut === 1 ? 'was' : 'were'} left out.` : ''}`;
   }
   let done = $state('');
 
@@ -92,6 +93,7 @@
     restoring = true;
     try {
       done = summary(await restore(pending.backup, mode));
+      forgetShelves();
       pending = null;
       toast(mode === 'merge' ? 'Merged' : 'Restored', 'ok', { label: 'Undo', run: () => undo(false) });
     } catch (e) {
@@ -109,6 +111,7 @@
     if (ask && !confirm(`Put back ${what} (from ${ago(u.at)})? Anything changed since then is kept aside too, so you can switch back afterwards.`)) return;
     try {
       toast((await undoRestore()) ? `Put back ${what}` : 'Nothing to undo');
+      forgetShelves();
       done = '';
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
@@ -178,17 +181,17 @@
       </div>
       {#if pending.problems.length}
         <div class="small" role="alert">
-          <p>{n(pending.problems.length, 'record')} in this file cannot be read and will be left out, so it can be merged but not used to replace everything:</p>
+          <p>{n(pending.problems.length, 'record')} in this file cannot be fully read. What cannot be read is left out, so the file can be merged but not used to replace everything:</p>
           <ul>{#each pending.problems.slice(0, 5) as p}<li>{p}</li>{/each}</ul>
           {#if pending.problems.length > 5}<p>…and {pending.problems.length - 5} more.</p>{/if}
         </div>
       {/if}
-      <p class="small muted">Merge adds missing records and uses the latest dated edits. Deletions made on this device stay in effect. Undo swaps back to the collection you had immediately before the restore.</p>
+      <p class="small muted">Merge adds what is missing and keeps the newest edit of each thing. What you removed here stays removed, unless the file has a later change to it. Either way can be undone.</p>
     </div>
   {/if}
   {#if done}<p class="small" role="status">{done}</p>{/if}
   {#if unreadable.length}
-    <p class="small" role="alert">{n(unreadable.length, 'record')} here cannot be read back from a backup, for example {unreadable[0]}. Everything else is in the file.</p>
+    <p class="small" role="alert">{n(unreadable.length, 'record')} here cannot be fully read back from a backup, for example {unreadable[0]}. Everything else is in the file.</p>
   {/if}
   {#if data.value.undo && !pending}
     <p class="small muted">
