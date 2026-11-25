@@ -366,5 +366,5 @@
   .ways { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.6rem; }
   .ways a { display: grid; gap: 0.15rem; color: var(--text); text-decoration: none; padding: 0.75rem 0.9rem; height: 100%; align-content: start; }
   .ways a:hover { border-color: var(--muted); }
-  .linkish { display: inline; min-height: 0; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; font-size: inherit; }
+  .linkish { display: inline; min-height: 24px; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; font-size: inherit; }
 </style>

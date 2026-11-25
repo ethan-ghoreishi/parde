@@ -350,7 +350,7 @@
       </div>
 
       <aside class="side-col">
-        {#if t.overview}
+        {#if t.overview && !(ahead && premise(t.overview) === t.overview.replace(/\s+/g, ' ').trim())}
           <section class="section">
             <h2>About</h2>
             <p class="small">{t.overview}</p>
@@ -425,7 +425,6 @@
   .people, .history { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
   .people a { color: var(--text); }
   .follow { color: var(--text); margin: 0; gap: 0.4rem; }
-  .follow input { accent-color: var(--accent); width: 18px; height: 18px; }
   .video { width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
   .video iframe { width: 100%; height: 100%; border: 0; }
   .links { gap: 1rem; }

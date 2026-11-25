@@ -10,7 +10,7 @@
       <span>{ui.toast.text}</span>
       {#if ui.toast.action}
         {@const a = ui.toast.action}
-        <button type="button" class="small" onclick={() => { ui.toast = null; a.run(); }}>{a.label}</button>
+        <button type="button" class="small" onclick={() => { const { run } = a; ui.toast = null; run(); }}>{a.label}</button>
       {/if}
     </div>
   {/if}

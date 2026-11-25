@@ -1,3 +1,5 @@
+import { tick } from 'svelte';
+
 /** Hash routing: works on GitHub Pages without server rewrites, and offline. */
 function parse() {
   const raw = location.hash.replace(/^#/, '') || '/';
@@ -25,7 +27,9 @@ addEventListener('hashchange', () => {
   clearTimeout(saving);
   const moved = parse().path !== route.path;
   Object.assign(route, parse());
-  scrollBack((history.state as { y?: number } | null)?.y ?? 0);
+  // Once the new page has replaced the old one, whose height says nothing about it.
+  const y = (history.state as { y?: number } | null)?.y ?? 0;
+  tick().then(() => scrollBack(y));
   // A new page, not just a filter: keyboard and screen reader users start at its top.
   if (moved) document.getElementById('main')?.focus({ preventScroll: true });
 });

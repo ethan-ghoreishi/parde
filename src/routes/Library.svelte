@@ -128,7 +128,7 @@
 
 <style>
   .status { gap: 0.3rem; }
-  .status .chip { padding: 0.15rem 0.68rem; }
+  .status .chip { padding: 0.15rem 0.56rem; }
   .controls { margin: 0.75rem 0 1.25rem; }
   .centre { justify-content: center; }
   .filters input { flex: 2 1 200px; width: auto; }

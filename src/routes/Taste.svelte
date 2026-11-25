@@ -145,7 +145,7 @@
         <p class="small">
           {#if enjoy === 'few'}Too few rated so far to compare.
           {:else if enjoy === 'unclear'}No reliable difference yet between how you rate 80% or more and {other.label}.
-          {:else}You rate 80% or more {enjoy === 'higher' ? 'higher' : 'lower'} than {other.label}, by more than chance.{/if}
+          {:else}Among what you chose to watch, you rate 80% or more {enjoy === 'higher' ? 'higher' : 'lower'} than {other.label}, by more than chance.{/if}
           {#if low < 5}You have rated {low || 'none'} under 60%: too few to say whether a low score would steer you right.{/if}
         </p>
         {#if critics.n >= 5}
@@ -268,7 +268,7 @@
   .stats strong { font-family: var(--serif); font-size: 1.8rem; font-variant-numeric: tabular-nums; }
   @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
   .lead { max-width: 60ch; margin-bottom: 1.25rem; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; align-items: start; }
   @media (max-width: 400px) { .cards { grid-template-columns: 1fr; } }
   .cards h3 { font-family: var(--sans); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 0.9rem; }
   .gaps, .aff { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }

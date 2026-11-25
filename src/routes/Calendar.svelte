@@ -237,7 +237,14 @@
   .name { color: var(--text); font-weight: 600; text-decoration: none; }
   .acts { display: grid; gap: 0.4rem; justify-items: end; }
   .seen { display: flex; gap: 0.35rem; align-items: center; color: var(--text); margin: 0; font-size: 0.9rem; }
-  .seen input { width: 20px; height: 20px; accent-color: var(--accent); }
   .note { margin-top: 1.5rem; line-height: 2; }
-  @media (max-width: 480px) { .week a { min-height: 56px; } .weeknav .icon { width: 32px; } }
+  @media (max-width: 480px) {
+    .week { gap: 0.1rem; }
+    .week a { min-height: 56px; }
+    .weeknav { gap: 0.2rem; }
+    .weeknav .icon { width: 34px; }
+    .eps li { flex-wrap: wrap; }
+    .info { flex-basis: 0; min-width: 8rem; }
+    .acts { width: 100%; display: flex; flex-wrap: wrap; align-items: center; }
+  }
 </style>

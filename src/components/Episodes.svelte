@@ -109,7 +109,7 @@
   li { border-top: 1px solid var(--line); }
   li.next { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 8px; }
   .ep { display: flex; align-items: center; gap: 0.25rem; }
-  input[type='checkbox'] { width: 22px; height: 22px; margin: 0 0.5rem; accent-color: var(--accent); flex-shrink: 0; }
+  input[type='checkbox'] { margin: 0 0.5rem; }
   .line { flex: 1; justify-content: flex-start; gap: 0.6rem; min-width: 0; border-radius: 8px; white-space: normal; text-align: left; flex-wrap: wrap; }
   .code { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
   li.on .name { color: var(--muted); }

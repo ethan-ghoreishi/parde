@@ -28,10 +28,10 @@
     --line: #e2d7c9;
     --text: #1f1a16;
     --muted: #6d6157;
-    --accent: #a85a14;
+    --accent: #98500f;
     --accent-ink: #ffffff;
     --curtain: #9e2a2b;
-    --ok: #2f7a3b;
+    --ok: #2a6f36;
     --danger: #b3412a;
     --danger-ink: #ffffff;
     --field: #8c7f72;
@@ -127,6 +127,10 @@ select {
 }
 ::placeholder { color: var(--muted); opacity: 1; }
 textarea { min-height: 110px; resize: vertical; line-height: 1.5; }
+input[type='checkbox'], input[type='radio'] { width: 24px; height: 24px; margin: 0; flex: none; accent-color: var(--accent); }
+summary { cursor: pointer; min-height: 36px; align-content: center; }
+/* Links that stand on their own, rather than inside a sentence */
+.row > a:not(.btn, .chip), a.small, .stack > a.small { display: inline-flex; align-items: center; min-height: 32px; }
 label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.25rem; }
 
 .muted { color: var(--muted); }
@@ -158,8 +162,8 @@ label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0
 button.chip, a.chip { min-height: 36px; font-size: 0.87rem; text-decoration: none; }
 button.chip { padding: 0.15rem 0.8rem; }
 
-.chip.stream { border-color: var(--ok); color: var(--ok); }
-.chip.broadcast { border-color: var(--accent); color: var(--accent); }
+.chip.stream { border-color: var(--ok); color: var(--ok); white-space: normal; }
+.chip.broadcast { border-color: var(--accent); color: var(--accent); white-space: normal; }
 
 .grid {
   display: grid;
@@ -200,6 +204,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.6); }
 
 /* One row, even ten across on a phone. */
 .scale { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 0.25rem; max-width: calc(var(--n) * 3rem); }
+@media (max-width: 360px) { .scale:not(.words) { grid-template-columns: repeat(min(var(--n), 5), minmax(0, 1fr)); } }
 .scale.words { display: flex; flex-wrap: wrap; max-width: none; }
 .scale button { min-width: 0; padding: 0; border-radius: 10px; }
 .scale.words button { padding: 0 0.8rem; border-radius: 999px; }
