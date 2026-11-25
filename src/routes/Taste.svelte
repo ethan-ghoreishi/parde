@@ -153,7 +153,7 @@
         {/if}
         {#if critics.n >= 8 && critics.warmer.length}<h3>You place higher than critics do</h3>{@render gapList(critics.warmer)}{/if}
         {#if critics.n >= 8 && critics.colder.length}<h3>Critics place higher than you do</h3>{@render gapList(critics.colder)}{/if}
-        <p class="small muted">“Unseen” means before you opened the scores in Discover. Audience scores (Rotten Tomatoes, IMDb) have no open source, so ideas about critics and audiences disagreeing can only be tested by what drew you, below.</p>
+        <p class="small muted">“Unseen” means before you opened the scores in Discover. Audience scores have no open source for most titles, so ideas about critics and audiences disagreeing can only be tested by what drew you.</p>
       </section>
     {/if}
 

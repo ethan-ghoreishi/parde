@@ -18,7 +18,7 @@
         <li>{scoreText(c)}{#if c.asOf}<span class="muted">, as of {c.asOf.slice(0, 4)}</span>{/if}</li>
       {/each}
     </ul>
-    <p class="small muted">{critics.some((c) => c.source !== 'TVmaze') ? 'From Wikidata, which can lag the live sites. Audience scores are not available there.' : 'From TVmaze.'} Different scales: not comparable with each other.</p>
+    <p class="small muted">{critics.some((c) => c.source !== 'TVmaze') ? 'From Wikidata, which can lag the live sites and rarely has audience scores.' : 'From TVmaze.'} Different scales: not comparable with each other.</p>
   </details>
 {/if}
 
