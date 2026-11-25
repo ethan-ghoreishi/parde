@@ -9,6 +9,7 @@
   import Poster from './Poster.svelte';
   import Scale from './Scale.svelte';
   import ProgressPicker from './ProgressPicker.svelte';
+  import Toast from './Toast.svelte';
   import { EXPECTATIONS } from '../lib/taste';
 
   let dialog: HTMLDialogElement;
@@ -18,7 +19,7 @@
   let people = $state<PersonHit[]>([]);
   let loading = $state(false);
   let error = $state('');
-  let busy = $state<string | null>(null);
+  let busy = $state<Record<string, boolean>>({});
   /** Items added in this session, so the row can ask a follow-up question */
   let added = $state<Record<string, Status>>({});
   let seq = 0;
@@ -75,24 +76,17 @@
   }
 
   async function add(kind: 'film' | 'show', key: string | number, status: Status) {
-    busy = `${key}`;
+    if (busy[key]) return;
+    busy[key] = true;
     try {
-      const id = kind === 'film' ? await addFilm(key as string) : await addShow(key as number);
-      if (status !== 'want') {
-        if (kind === 'show' && status === 'watched') {
-          // "Seen all" of a running show means caught up: it stays in progress for the next season.
-          await seenAllAired(id);
-          const t = await db.titles.get(id);
-          if (t?.status !== 'watched') await update(id, { status: t?.showStatus === 'Ended' ? 'watched' : 'watching' });
-        } else {
-          await update(id, { status });
-        }
-      }
+      // "Seen all" of a running show means caught up: marking its episodes leaves it in progress for the next season.
+      const id = kind === 'film' ? await addFilm(key as string, { status }) : await addShow(key as number, status === 'watching' ? { status } : {});
+      if (kind === 'show' && status === 'watched') await seenAllAired(id);
       added[id] = status;
     } catch (e) {
       toast(errorText(e), 'error');
     } finally {
-      busy = null;
+      busy[key] = false;
     }
   }
 
@@ -146,7 +140,7 @@
             {#if own}
               <button class="small" onclick={() => open(id)}>Open</button>
               {#if !added[id]}<span class="small muted">{own.status === 'want' ? 'On list' : 'In library'}</span>{/if}
-            {:else if busy === `${key}`}
+            {:else if busy[key]}
               <span class="small muted">Adding…</span>
             {:else}
               <button class="small primary" onclick={() => add(kind, key, 'want')}>Want</button>
@@ -187,6 +181,7 @@
         <p class="muted small">Nothing found. Try the original title, fewer words, or add the year (e.g. “Heat 1995”).</p>
       {/if}
     </div>
+    <Toast />
     <p class="muted small credit">Search titles or people (directors, writers, actors). Films from Wikipedia & Wikidata, series from TVmaze.</p>
   </div>
 </dialog>

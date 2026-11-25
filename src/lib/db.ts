@@ -22,6 +22,10 @@ export interface CriticScore {
   asOf?: string;
 }
 
+/** The parts of a title you set yourself; everything else is looked up. */
+export const USER_FIELDS = ['status', 'followed', 'expectation', 'rating', 'partnerRating', 'themes', 'note', 'drawn'] as const;
+export type UserField = (typeof USER_FIELDS)[number];
+
 export interface Title {
   /** 'wd:Q123' for films, 'tvm:44933' for shows */
   id: string;
@@ -67,6 +71,13 @@ export interface Title {
   /** What it was about for you: a few words each, chosen after watching */
   themes?: string[];
   note?: string;
+  /** Discover: when you chose to want it, and when Parde first showed you its scores before you had seen it */
+  chosenAt?: string;
+  scoresAt?: string;
+  /** What drew you to it (Discover, optional) */
+  drawn?: string[];
+  /** When you last changed each of these yourself, clearing included, so a merge keeps the newer edit */
+  edited?: Partial<Record<UserField, string>>;
   addedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -86,12 +97,16 @@ export interface Episode {
   airstamp?: string;
   runtime?: number;
   summary?: string;
+  /** Not in TVmaze's latest list (gone, or a partial reply): set aside, never deleted */
+  missingSince?: string;
 }
 
 export interface Seen {
   episodeId: number;
   titleId: string;
   seenAt: string;
+  /** Marked along with others ("seen all"): seenAt is when you said so, not when you watched it */
+  bulk?: boolean;
 }
 
 /** One viewing of a film (or finishing a show). Rewatches add another. */
@@ -120,8 +135,20 @@ export interface Setting {
   value: unknown;
 }
 
+/** A title you chose not to watch, with what was known then (older rows have only the id and date). */
 export interface Dismissed {
   qid: string;
+  at: string;
+  name?: string;
+  year?: number;
+  critics?: CriticScore[];
+  scoresAt?: string;
+}
+
+/** Something you removed or unmarked, so merging an older backup does not bring it back. */
+export interface Removed {
+  /** 'title:wd:Q1' · 'seen:123' · 'link:<id>' · 'watch:<id>' */
+  key: string;
   at: string;
 }
 
@@ -133,6 +160,7 @@ export class PardeDB extends Dexie {
   links!: EntityTable<Link, 'id'>;
   settings!: EntityTable<Setting, 'key'>;
   dismissed!: EntityTable<Dismissed, 'qid'>;
+  removed!: EntityTable<Removed, 'key'>;
 
   constructor(name = 'parde') {
     super(name);
@@ -145,12 +173,13 @@ export class PardeDB extends Dexie {
       settings: 'key',
       dismissed: 'qid',
     });
+    this.version(2).stores({ removed: 'key' });
   }
 }
 
 export const db = new PardeDB();
 
-export const STORES = ['titles', 'episodes', 'seen', 'watches', 'links', 'settings', 'dismissed'] as const;
+export const STORES = ['titles', 'episodes', 'seen', 'watches', 'links', 'settings', 'dismissed', 'removed'] as const;
 export type StoreName = (typeof STORES)[number];
 
 export const now = () => new Date().toISOString();

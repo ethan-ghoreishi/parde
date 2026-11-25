@@ -1,4 +1,5 @@
 import { liveQuery } from 'dexie';
+import { errorText, ui } from './ui.svelte';
 
 /**
  * Reactive Dexie query. `deps` runs inside an effect (so reading $state there re-subscribes);
@@ -13,8 +14,9 @@ export function live<T>(deps: () => () => Promise<T> | T, initial: T) {
       next: (v) => {
         value = v;
         ready = true;
+        ui.storageError = '';
       },
-      error: (e) => console.error(e),
+      error: (e) => (ui.storageError = errorText(e)),
     });
     return () => sub.unsubscribe();
   });

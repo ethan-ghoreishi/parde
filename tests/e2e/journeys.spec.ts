@@ -37,7 +37,16 @@ async function stub(page: Page) {
   });
   await page.route(/query\.wikidata\.org\/sparql/, (r) => {
     const q = new URL(r.request().url()).searchParams.get('query')!;
-    if (q.includes('wikibase:sitelinks')) {
+    if (q.includes('AS %found')) {
+      // Discover: what shares a thread
+      return r.fulfill({ json: { results: { bindings: [
+        sparqlRow({ f: 'http://www.wikidata.org/entity/Q42198', fLabel: 'Heat', types: 'http://www.wikidata.org/entity/Q11424', l: '60', score: '9', y: '1995', article: 'https://en.wikipedia.org/wiki/Heat_(1995_film)' }),
+        sparqlRow({ f: 'http://www.wikidata.org/entity/Q700', fLabel: 'Thief', types: 'http://www.wikidata.org/entity/Q11424', l: '30', score: '5', y: '1981' }),
+        sparqlRow({ f: 'http://www.wikidata.org/entity/Q701', fLabel: 'Manhunter', types: 'http://www.wikidata.org/entity/Q11424', l: '30', score: '4', y: '1986' }),
+        sparqlRow({ f: 'http://www.wikidata.org/entity/Q702', fLabel: 'Severance', types: 'http://www.wikidata.org/entity/Q5398426', l: '30', score: '3', y: '2022', tvm: '44933' }),
+      ] } } });
+    }
+    if (q.includes('VALUES ?label')) {
       return r.fulfill({ json: { results: { bindings: [
         sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q42198', type: 'http://www.wikidata.org/entity/Q11424', links: '80', y: '1995' }),
         sparqlRow({ name: 'Heat', item: 'http://www.wikidata.org/entity/Q1', type: 'http://www.wikidata.org/entity/Q11424', links: '5', y: '1972' }),
@@ -80,7 +89,8 @@ test('add a film as seen, rate it inline, and see it in the library and taste pa
   await row.getByRole('button', { name: 'Open' }).click();
 
   await expect(page.getByRole('heading', { name: 'Dune: Part Two', level: 1 })).toBeVisible();
-  await expect(page.getByText('92% Rotten Tomatoes')).toBeVisible();
+  // Rated: nothing left to influence, so what others thought is open, in words that say what it measures
+  await expect(page.getByRole('listitem').filter({ hasText: '92% of critics positive (Rotten Tomatoes)' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Denis Villeneuve' })).toBeVisible();
   await expect(page.getByText('director, writer')).toBeVisible();
   await expect(page.getByRole('group', { name: 'Your rating' }).getByRole('button', { name: '9', exact: true })).toHaveAttribute('aria-pressed', 'true');
@@ -88,7 +98,7 @@ test('add a film as seen, rate it inline, and see it in the library and taste pa
   await page.getByRole('link', { name: 'Library' }).first().click();
   await expect(page.locator('.tile', { hasText: 'Dune: Part Two' })).toContainText('9');
   await page.goto('./#/taste');
-  await expect(page.locator('.stats')).toContainText('1films watched');
+  await expect(page.locator('.stats')).toContainText('1films seen');
 });
 
 test('want a film, record trailer keenness, log a watch with partner rating', async ({ page }) => {
@@ -146,7 +156,12 @@ test('a series already part-watched is placed in one step, and Tonight resumes t
   const row = page.locator('li.hit', { hasText: 'Severance' });
   await row.getByRole('button', { name: 'Watching' }).click();
   await row.getByLabel('Where are you up to?').selectOption({ label: 'S01E09 · end of season 1' });
-  await expect(page.getByRole('status')).toContainText('Seen up to S01E09');
+  // The toast is inside the open dialog, so its Undo can be reached
+  const undo = page.locator('dialog[open]').getByRole('button', { name: 'Undo' });
+  await undo.click();
+  await expect(row.getByLabel('Where are you up to?')).toHaveValue('none');
+  await row.getByLabel('Where are you up to?').selectOption({ label: 'S01E09 · end of season 1' });
+  await expect(undo).toBeVisible();
   await row.getByRole('button', { name: 'Open' }).click();
   await expect(page.locator('.next-ep')).toContainText('S02E01');
   await page.getByRole('link', { name: 'Tonight' }).first().click();
@@ -190,7 +205,7 @@ test('calendar groups a season drop and says where the date comes from', async (
   const card = page.locator('.eps li', { hasText: 'Severance' }).first();
   await expect(card).toContainText('S01E01–E02 · 2 episodes');
   await expect(card).toContainText('Released on Apple TV');
-  await expect(card).toContainText('No source saved');
+  await expect(card.getByRole('button', { name: 'Sources for Severance S01E01' })).toContainText('Add a source');
   await card.getByRole('button', { name: 'All seen' }).click();
   await expect(card).toContainText('All seen');
 });
@@ -214,7 +229,7 @@ test('follow a series: pattern source, resume from Tonight, broken-link fallback
   await page.getByRole('region', { name: 'Sources for the whole series' }).getByRole('button', { name: '+ Add source' }).click();
   await page.getByRole('region', { name: 'Sources for the whole series' }).getByRole('textbox', { name: 'Link' }).fill('site-b.org/severance');
   await page.getByRole('region', { name: 'Sources for the whole series' }).getByRole('button', { name: 'Save' }).click();
-  await expect(page.getByRole('status')).toContainText('Source saved');
+  await expect(page.locator('.toast').first()).toContainText('Source saved');
 
   // Resume from Tonight
   await page.getByRole('link', { name: 'Tonight' }).first().click();
@@ -229,10 +244,24 @@ test('follow a series: pattern source, resume from Tonight, broken-link fallback
   expect(await popup.evaluate(() => window.opener)).toBeNull();
   await popup.close();
 
-  // Mark it broken: the next source takes over
-  await card.locator('a.name').click();
-  await page.getByRole('region', { name: 'Sources for the whole series' }).getByRole('button', { name: 'Broken' }).first().click();
-  await expect(page.getByRole('button', { name: /Watch on site-b\.org/ })).toBeVisible();
+  // It did not work: one tap opens the next source, and the broken one steps aside
+  const [second] = await Promise.all([page.waitForEvent('popup'), card.getByRole('button', { name: 'Try site-b.org ↗' }).click()]);
+  await expect.poll(() => second.url()).toContain('site-b.org/severance');
+  await second.close();
+  await expect(card.getByRole('button', { name: /Watch on site-b\.org/ })).toBeVisible();
+
+  // Every source for this exact episode, without leaving Tonight
+  await card.getByRole('button', { name: 'Sources for Severance S01E02' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Severance S01E02' });
+  await expect(sheet.getByRole('button', { name: /site-b\.org whole series/ })).toBeVisible();
+  await sheet.getByRole('button', { name: '1 broken link' }).click();
+  await sheet.getByRole('button', { name: 'Works again' }).click();
+  await sheet.getByRole('button', { name: '+ Add source' }).click();
+  await sheet.getByRole('textbox', { name: 'Link' }).fill('https://site-b.org/just-this-one');
+  await sheet.getByRole('button', { name: 'Save' }).click();
+  await expect(sheet.getByRole('button', { name: 'Copy link to site-b.org' }).first()).toBeVisible();
+  await sheet.getByRole('button', { name: 'Close' }).click();
+  await expect(card.getByRole('button', { name: 'Sources for Severance S01E02' })).toHaveText('Sources (3)');
 });
 
 test('backup downloads, rejects junk, and restores into an empty browser', async ({ page, browser }) => {
@@ -250,6 +279,16 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   await page.locator('input[type=file]').setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{"nope":1}') });
   await expect(page.getByRole('alert')).toContainText('not a Parde backup');
 
+  await page.locator('input[type=file]').setInputFiles({ name: 'partial.json', mimeType: 'application/json', buffer: Buffer.from('{"app":"parde","schemaVersion":1,"data":{"titles":[]}}') });
+  await expect(page.getByRole('alert')).toContainText('incomplete');
+  // One damaged record: the rest can be merged, but never replaces everything
+  const damaged = JSON.parse(text);
+  damaged.data.watches.push({ id: 'w', titleId: damaged.data.titles[0].id, date: 'yesterday', together: true });
+  await page.locator('input[type=file]').setInputFiles({ name: 'damaged.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(damaged)) });
+  await expect(page.getByRole('alert')).toContainText('1 record in this file cannot be read');
+  await expect(page.getByRole('button', { name: 'Replace everything' })).toBeHidden();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+
   // Restore into a brand-new browser profile
   const fresh = await browser.newContext();
   const p2 = await fresh.newPage();
@@ -258,10 +297,149 @@ test('backup downloads, rejects junk, and restores into an empty browser', async
   await p2.locator('input[type=file]').setInputFiles({ name: 'parde.json', mimeType: 'application/json', buffer: Buffer.from(text) });
   await expect(p2.getByRole('region', { name: 'Backup preview' })).toContainText('1 titles');
   await p2.getByRole('button', { name: 'Merge into this browser' }).click();
-  await expect(p2.getByRole('status')).toContainText('merged');
+  await expect(p2.getByText('Merged: 1 title added.')).toBeVisible();
   await p2.goto('./#/library');
   await expect(p2.locator('.tile', { hasText: 'Dune: Part Two' })).toBeVisible();
   await fresh.close();
+});
+
+/** A stored record, as it really is. */
+const stored = (page: Page, store: string, key: string) =>
+  page.evaluate(([store, key]) => new Promise<Record<string, unknown> | undefined>((ok, no) => {
+    const open = indexedDB.open('parde');
+    open.onerror = () => no(open.error);
+    open.onsuccess = () => {
+      const q = open.result.transaction(store).objectStore(store).get(key);
+      q.onsuccess = () => (open.result.close(), ok(q.result));
+      q.onerror = () => no(q.error);
+    };
+  }), [store, key] as const);
+
+test('discover: rating is saying you have seen it; scores stay closed, and opening them first is remembered', async ({ page }) => {
+  await page.getByRole('link', { name: 'Start with what you have seen' }).click();
+  await expect(page.getByRole('heading', { name: 'Seen by almost everyone' })).toBeVisible();
+  await expect(page.locator('.tile')).toHaveCount(12);
+  // Two taps: the poster, then the rating
+  await page.locator('.tile').first().click();
+  const panel = page.locator('.panel');
+  await panel.getByRole('button', { name: '9', exact: true }).click();
+  await expect(panel).toContainText('Seen: 9/10.');
+  await expect(page.locator('.tile').first()).toContainText('9');
+  const qid = (await page.locator('.tile').first().getAttribute('id'))!.slice(5);
+  const added = await stored(page, 'titles', `wd:${qid}`);
+  expect(added).toMatchObject({ status: 'watched', rating: 9 });
+  expect(added!.finishedAt).toBeUndefined(); // no viewing date is made up
+
+  // A thread: Heat's scores are opened before choosing, Thief's are not
+  await page.goto('./#/discover?from=title:Q42&name=Collateral');
+  await expect(page.getByRole('heading', { name: 'Like Collateral' })).toBeVisible();
+  await page.locator('.tile', { hasText: 'Heat' }).click();
+  await expect(page.getByText(/of critics positive/)).toBeHidden();
+  await panel.getByText('What others thought').click();
+  await expect(page.getByText(/92% of critics positive/)).toBeVisible();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel).toContainText('On your list.');
+  await panel.getByRole('button', { name: 'the people' }).click();
+  await expect(panel.getByRole('button', { name: 'the people' })).toHaveAttribute('aria-pressed', 'true');
+  const heat = await stored(page, 'titles', 'wd:Q42198');
+  expect(heat).toMatchObject({ status: 'want', drawn: ['the people'] });
+  expect((heat!.scoresAt as string) <= (heat!.chosenAt as string)).toBe(true);
+
+  await page.locator('.tile', { hasText: 'Thief' }).click();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel).toContainText('On your list.');
+  expect((await stored(page, 'titles', 'wd:Q700'))!.scoresAt).toBeUndefined();
+
+  // Not for me, and back again
+  await page.locator('.tile', { hasText: 'Manhunter' }).click();
+  await panel.getByRole('button', { name: 'Not for me' }).click();
+  await expect(page.locator('.tile', { hasText: 'Manhunter' })).toContainText('Not for you');
+  expect(await stored(page, 'dismissed', 'Q701')).toMatchObject({ name: 'Manhunter' });
+  await panel.getByRole('button', { name: 'Undo' }).click();
+  await expect(panel.getByRole('button', { name: 'Want to watch' })).toBeVisible();
+
+  // A series: marked as all seen, with one step to say otherwise
+  await page.locator('.tile', { hasText: 'Severance' }).click();
+  await panel.getByRole('button', { name: '8', exact: true }).click();
+  await expect(panel.getByLabel(/Only some\? Up to/)).toHaveValue(/^\d+$/);
+  await panel.getByLabel(/Only some\? Up to/).selectOption({ label: 'S01E09 · end of season 1' });
+  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+
+  // Opening a title and coming back finds the shelf as it was
+  await panel.getByRole('link', { name: 'Open' }).click();
+  await expect(page.getByRole('heading', { name: 'Severance', level: 1 })).toBeVisible();
+  await expect(page.locator('.next-ep')).toContainText('S02E01');
+  await page.goBack();
+  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+  // The same by the tab bar: an installed app has no Back button
+  await page.locator('.tile', { hasText: 'Heat' }).click();
+  await panel.getByRole('link', { name: 'Open' }).click();
+  await expect(page.getByRole('heading', { name: 'Heat', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Discover', exact: true }).first().click();
+  await expect(page.getByRole('heading', { name: 'Like Collateral' })).toBeVisible();
+  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+});
+
+test('a write that fails is never reported as done', async ({ page }) => {
+  await search(page, 'dune');
+  await page.locator('li.hit', { hasText: 'Dune: Part Two' }).getByRole('button', { name: 'Seen' }).click();
+  await page.locator('li.hit').getByRole('button', { name: 'Open' }).click();
+  await page.evaluate(() => {
+    IDBObjectStore.prototype.put = function () {
+      throw new DOMException('no room', 'QuotaExceededError');
+    };
+  });
+  await page.getByRole('group', { name: 'Your rating' }).getByRole('button', { name: '9', exact: true }).click();
+  await expect(page.locator('.toast').first()).toContainText('Not saved');
+  await expect(page.getByRole('group', { name: 'Your rating' }).getByRole('button', { name: '9', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('textbox', { name: 'Your notes' }).fill('lost?');
+  await expect(page.locator('.toast').first()).toContainText('Your note is not saved');
+  await expect(page.getByText('Saved', { exact: true })).toBeHidden();
+});
+
+test('import asks what it cannot know: the scale, the title, and where you are', async ({ page }) => {
+  await search(page, 'severance');
+  const hit = page.locator('li.hit', { hasText: 'Severance' });
+  await hit.getByRole('button', { name: 'Watching' }).click();
+  await hit.getByLabel('Where are you up to?').selectOption({ label: 'S01E02 · Half Loop' });
+  await page.keyboard.press('Escape');
+  await page.goto('./#/import');
+  const find = page.getByRole('button', { name: /Find 2 titles/ });
+  await page.getByLabel(/type or paste a list/).fill('Heat 5\nSeverance S01E05');
+  await expect(find).toBeDisabled(); // out of 5 or 10? not guessed
+  await page.getByRole('button', { name: '10', exact: true }).click();
+  await find.click();
+  // "Heat" without a year is two films: neither is chosen
+  const choose = page.getByLabel('Match for Heat 5');
+  await expect(choose).toHaveValue('-1');
+  await choose.selectOption({ index: 1 });
+  await page.getByRole('button', { name: /Add 1 title and update 1/ }).click();
+  await expect(page.getByText('here S01E02, in your list S01E05')).toBeVisible();
+  await page.getByRole('button', { name: 'Move to S01E05' }).click();
+  await page.goto('./#/t/tvm%3A44933');
+  await expect(page.locator('.next-ep')).toContainText('S01E06');
+  expect(await stored(page, 'titles', 'wd:Q42198')).toMatchObject({ rating: 5 });
+});
+
+test('finding your way: page titles, focus and the way back', async ({ page, browserName }) => {
+  await search(page, 'severance');
+  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
+  await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Open' }).click();
+  await expect(page).toHaveTitle('Severance · Parde');
+  await expect(page.locator('#main')).toBeFocused();
+  await page.locator('.season-head').first().waitFor();
+  await page.evaluate(() => scrollTo(0, 600));
+  await page.waitForTimeout(400);
+  const y = await page.evaluate(() => scrollY);
+  expect(y).toBeGreaterThan(300);
+  await page.goto('./#/library');
+  await expect(page).toHaveTitle('Library · Parde');
+  // A slow phone: the page fills in over several steps, above where you were too.
+  if (browserName === 'chromium') await (await page.context().newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: 20 });
+  await page.goBack();
+  await page.locator('.season-head').first().waitFor();
+  await page.waitForTimeout(1500);
+  expect(await page.evaluate(() => scrollY)).toBe(y);
 });
 
 test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the bottom edge and never covers the end of a page', async ({ page, isMobile }) => {
@@ -272,7 +450,7 @@ test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the b
   await expect(hit.getByText('Where are you up to?')).toBeVisible();
   await page.keyboard.press('Escape');
   // Short pages (an empty calendar day) and long ones (a series with its episode list)
-  for (const p of ['./', './#/calendar?d=2001-01-01', './#/library', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
+  for (const p of ['./', './#/calendar?d=2001-01-01', './#/library', './#/discover?from=decade:1990', './#/taste', './#/settings', './#/import', './#/t/tvm%3A44933']) {
     await page.goto(p);
     await page.waitForTimeout(150);
     const at = (where: 'top' | 'end') =>
@@ -335,7 +513,8 @@ test.describe('offline', () => {
     await expect(page.locator('.tile', { hasText: 'Dune: Part Two' })).toBeVisible();
     await page.locator('.tile', { hasText: 'Dune: Part Two' }).click();
     await expect(page.getByRole('heading', { name: 'Dune: Part Two' })).toBeVisible();
-    await page.getByRole('link', { name: 'Taste' }).first().click();
+    await page.getByRole('link', { name: 'Discover' }).first().click();
+    await page.getByRole('link', { name: 'Your taste' }).click();
     await expect(page.getByRole('heading', { name: 'Your taste' })).toBeVisible();
     await context.setOffline(false);
   });

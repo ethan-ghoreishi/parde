@@ -1,4 +1,4 @@
-import { db, now, STORES, type Episode, type Seen, type StoreName, type Title } from './db';
+import { db, now, STORES, USER_FIELDS, type Episode, type Link, type Removed, type Seen, type StoreName, type Title, type Watch } from './db';
 import { reconcile } from './actions';
 import { cleanUrl } from './links';
 
@@ -9,6 +9,8 @@ export interface Backup {
   schemaVersion: number;
   exportedAt: string;
   data: Record<StoreName, unknown[]>;
+  /** Records in the file that could not be read (set when parsing, never stored) */
+  damaged?: number;
 }
 
 /** Settings key holding this device's data as it was just before the last restore. */
@@ -31,6 +33,10 @@ const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFin
 const optNum = (v: unknown, lo: number, hi: number) => v === undefined || (isNum(v) && v >= lo && v <= hi);
 const optStr = (v: unknown) => v === undefined || typeof v === 'string';
 const optBool = (v: unknown) => v === undefined || typeof v === 'boolean';
+/** A real date, or date and time, in the form Parde writes. */
+const isDate = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) && !Number.isNaN(Date.parse(v));
+const optDate = (v: unknown) => v === undefined || isDate(v);
+const optInt = (v: unknown, lo: number, hi: number) => v === undefined || (Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi);
 const strs = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === 'string');
 const STATUSES = ['want', 'watching', 'watched', 'paused', 'dropped'];
 const ROLES = ['director', 'writer', 'creator', 'cast', 'composer'];
@@ -74,10 +80,11 @@ const CHECKS: Record<StoreName, { key: string; check: Check; clean?: (r: Rec) =>
       : r.kind !== (r.id.startsWith('wd:') ? 'film' : 'show') ? 'bad kind'
       : !isStr(r.name) ? 'missing name'
       : !STATUSES.includes(r.status as string) ? 'bad status'
-      : !isStr(r.addedAt) || !isStr(r.updatedAt) ? 'missing dates'
-      : !optStr(r.finishedAt) || !optStr(r.expectedAt) ? 'bad dates'
-      : !optNum(r.rating, 1, 10) || !optNum(r.partnerRating, 1, 10) || !optNum(r.expectation, 1, 5) ? 'rating out of range'
-      : r.themes !== undefined && !(Array.isArray(r.themes) && r.themes.every(isStr)) ? 'bad themes'
+      : !isDate(r.addedAt) || !isDate(r.updatedAt) ? 'missing dates'
+      : !optDate(r.finishedAt) || !optDate(r.expectedAt) || !optDate(r.chosenAt) || !optDate(r.scoresAt) ? 'bad dates'
+      : !optInt(r.rating, 1, 10) || !optInt(r.partnerRating, 1, 10) || !optInt(r.expectation, 1, 5) ? 'rating out of range'
+      : (r.themes !== undefined && !strs(r.themes)) || (r.drawn !== undefined && !strs(r.drawn)) ? 'bad themes'
+      : r.edited !== undefined && !(r.edited && typeof r.edited === 'object' && Object.values(r.edited).every(isDate)) ? 'bad edit times'
       : !optStr(r.note) ? 'bad note'
       : !optBool(r.followed) ? 'bad calendar setting'
       : null,
@@ -86,22 +93,22 @@ const CHECKS: Record<StoreName, { key: string; check: Check; clean?: (r: Rec) =>
     key: 'id',
     clean: (r) => ({ ...r, name: typeof r.name === 'string' ? r.name : '', airtime: typeof r.airtime === 'string' ? r.airtime : '' }),
     check: (r) =>
-      !isNum(r.id) || !isStr(r.titleId) || !isNum(r.season) || !isNum(r.number) || typeof r.airdate !== 'string' || !optStr(r.airstamp) || !optStr(r.summary) || !optNum(r.runtime, 0, 1e4)
+      !isNum(r.id) || !isStr(r.titleId) || !isNum(r.season) || !isNum(r.number) || typeof r.airdate !== 'string' || !optStr(r.airstamp) || !optStr(r.summary) || !optNum(r.runtime, 0, 1e4) || !optDate(r.missingSince)
         ? 'bad episode'
         : null,
   },
-  seen: { key: 'episodeId', check: (r) => (!isNum(r.episodeId) || !isStr(r.titleId) || !isStr(r.seenAt) ? 'bad seen mark' : null) },
+  seen: { key: 'episodeId', check: (r) => (!isNum(r.episodeId) || !isStr(r.titleId) || !isDate(r.seenAt) || !optBool(r.bulk) ? 'bad seen mark' : null) },
   watches: {
     key: 'id',
-    check: (r) => (!isStr(r.id) || !isStr(r.titleId) || !isStr(r.date) || !/^\d{4}-\d{2}-\d{2}/.test(r.date) || typeof r.together !== 'boolean' ? 'bad watch' : null),
+    check: (r) => (!isStr(r.id) || !isStr(r.titleId) || !isDate(r.date) || typeof r.together !== 'boolean' ? 'bad watch' : null),
   },
   links: {
     key: 'id',
     check: (r) =>
-      !isStr(r.id) || !isStr(r.titleId) || !isStr(r.addedAt) ? 'bad link'
+      !isStr(r.id) || !isStr(r.titleId) || !isDate(r.addedAt) ? 'bad link'
       : !isStr(r.url) || cleanUrl(r.url) !== r.url ? 'unsafe or invalid link URL'
       : !optNum(r.season, 0, 1e4) || !optNum(r.episode, 0, 1e5) || (r.episode !== undefined && r.season === undefined) ? 'bad link episode'
-      : !optStr(r.label) || !optBool(r.broken) || !optStr(r.usedAt) ? 'bad link details'
+      : !optStr(r.label) || !optBool(r.broken) || !optDate(r.usedAt) ? 'bad link details'
       : null,
   },
   settings: {
@@ -109,15 +116,23 @@ const CHECKS: Record<StoreName, { key: string; check: Check; clean?: (r: Rec) =>
     check: (r) =>
       !isStr(r.key) ? 'bad setting'
       : r.key === 'sites' && !(Array.isArray(r.value) && r.value.every((x: Rec) => x && typeof x.name === 'string' && typeof x.url === 'string')) ? 'bad search sites'
-      : ['partner', 'lastBackupAt', 'showsSyncedAt'].includes(r.key) && typeof r.value !== 'string' ? `bad ${r.key}`
+      : ['partner', 'lastBackupAt', 'showsSyncedAt', 'filmsSyncedAt'].includes(r.key) && typeof r.value !== 'string' ? `bad ${r.key}`
+      : r.key === 'shown' && !strs(r.value) ? 'bad shown list'
       : null,
   },
-  dismissed: { key: 'qid', check: (r) => (!isStr(r.qid) ? 'bad dismissed item' : null) },
+  dismissed: { key: 'qid', check: (r) => (!isStr(r.qid) || !optDate(r.at) || !optDate(r.scoresAt) || !optStr(r.name) ? 'bad dismissed item' : null) },
+  removed: { key: 'key', check: (r) => (!isStr(r.key) || !/^(title|seen|link|watch):./.test(r.key) || !isDate(r.at) ? 'bad removal record' : null) },
 };
+/** Sections added after the first backups were made: an older file does not have them. */
+const LATER: StoreName[] = ['removed'];
 
-export type Parsed = { ok: true; backup: Backup; counts: Record<StoreName, number> } | { ok: false; error: string };
+export type Parsed = { ok: true; backup: Backup; counts: Record<StoreName, number>; problems: string[] } | { ok: false; error: string };
 
-/** Validate everything before anything is written. One bad record of yours rejects the file. */
+/**
+ * Check everything before anything is written. A file with a section missing is not a full backup at all.
+ * A single unreadable record does not cost you the rest: it is left out and listed, the file can be merged,
+ * but it cannot replace everything.
+ */
 export function parseBackup(text: string): Parsed {
   let doc: unknown;
   try {
@@ -134,32 +149,41 @@ export function parseBackup(text: string): Parsed {
   }
   const counts = {} as Record<StoreName, number>;
   const data = {} as Record<StoreName, unknown[]>;
+  const problems: string[] = [];
   for (const s of STORES) {
-    const rows = (d.data as Record<string, unknown>)[s] ?? [];
-    if (!Array.isArray(rows)) return { ok: false, error: `The ${s} section is damaged.` };
+    const rows = (d.data as Record<string, unknown>)[s] ?? (LATER.includes(s) ? [] : undefined);
+    if (!Array.isArray(rows)) return { ok: false, error: `This backup is incomplete: its ${s} section is ${rows === undefined ? 'missing' : 'damaged'}.` };
     const { key, check, clean } = CHECKS[s];
     const ids = new Set<unknown>();
     const out: Rec[] = [];
     for (const [i, row] of rows.entries()) {
-      if (!row || typeof row !== 'object' || Array.isArray(row)) return { ok: false, error: `${s} #${i + 1} is not a record.` };
-      const problem = check(row as Rec);
-      if (problem) return { ok: false, error: `${s} #${i + 1}: ${problem}.` };
-      const id = (row as Rec)[key];
-      if (ids.has(id)) return { ok: false, error: `${s} has a duplicate entry (${String(id)}).` };
-      ids.add(id);
-      if (s === 'settings' && id === UNDO_KEY) continue; // this device's own undo copy never travels
-      out.push(clean ? clean(row as Rec) : (row as Rec));
+      const r = row as Rec;
+      if (!r || typeof r !== 'object' || Array.isArray(r)) {
+        problems.push(`${s} #${i + 1} is not a record`);
+        continue;
+      }
+      if (s === 'settings' && r.key === UNDO_KEY) continue; // this device's own undo copy never travels
+      const problem = check(r) ?? (ids.has(r[key]) ? 'listed twice' : null);
+      if (problem) {
+        problems.push(`${s} #${i + 1}${isStr(r.name) ? ` (${r.name})` : ''}: ${problem}`);
+        continue;
+      }
+      ids.add(r[key]);
+      out.push(clean ? clean(r) : r);
     }
     data[s] = out;
     counts[s] = out.length;
   }
-  // Records that belong to a title must belong to one in the same file; episodes to a series.
-  const kinds = new Map((data.titles as { id: string; kind: string }[]).map((t) => [t.id, t.kind]));
-  for (const s of ['episodes', 'seen', 'watches', 'links'] as const) {
-    const stray = (data[s] as { titleId: string }[]).find((r) => !kinds.has(r.titleId) || ((s === 'episodes' || s === 'seen') && kinds.get(r.titleId) !== 'show'));
-    if (stray) return { ok: false, error: `${s} refers to a title that is not in the file, or is not a series (${stray.titleId}).` };
+  // Episodes belong to a series. A record whose title is not in the file is kept: it fits again if the title returns.
+  const kinds = new Map((data.titles as Title[]).map((t) => [t.id, t.kind]));
+  for (const s of ['episodes', 'seen'] as const) {
+    const bad = (data[s] as Seen[]).filter((r) => (kinds.get(r.titleId) ?? (r.titleId.startsWith('tvm:') ? 'show' : 'film')) !== 'show');
+    if (!bad.length) continue;
+    problems.push(`${s}: ${bad.length} belong to a film`);
+    data[s] = data[s].filter((r) => !bad.includes(r as Seen));
   }
-  return { ok: true, backup: { app: 'parde', schemaVersion: d.schemaVersion, exportedAt: String(d.exportedAt ?? ''), data }, counts };
+  const exportedAt = isDate(d.exportedAt) ? d.exportedAt : '';
+  return { ok: true, backup: { app: 'parde', schemaVersion: d.schemaVersion, exportedAt, data, damaged: problems.length }, counts, problems };
 }
 
 /** What can be put back: the data from before the last restore (or, after an undo, the restored data). */
@@ -170,53 +194,156 @@ interface UndoCopy {
   kind?: 'restore' | 'undo';
 }
 
+export interface Restored {
+  mode: 'merge' | 'replace';
+  added: number;
+  /** Titles here that took a newer edit (or a missing detail) from the file */
+  updated: number;
+  marks: number;
+  links: number;
+  watches: number;
+  /** In the file, but removed or unmarked here since it was made */
+  leftOut: number;
+}
+
+
 /**
- * merge: keeps everything here and adds the file's records; where both have the same title, the more
- * recently edited one wins. A series already here keeps its own episode list (it is the fresher one);
- * the file's seen marks are matched to it by season and episode number. replace: this device becomes
- * exactly the file. Either way, what was here before is kept aside first so the restore can be undone.
+ * One title recorded on two sides. Each thing you set follows its own latest edit, clearing included.
+ * Where edit times are unknown (older versions), the more recently edited title wins and the other fills gaps.
  */
-export async function restore(backup: Backup, mode: 'merge' | 'replace', undoKind: UndoCopy['kind'] | null = 'restore') {
-  const tables = STORES.map((s) => db.table(s));
-  const merged: string[] = [];
-  await db.transaction('rw', tables, async () => {
-    const before = undoKind ? await snapshot() : undefined;
+export function mergeTitle(here: Title, file: Title): Title {
+  const [newer, older] = file.updatedAt > here.updatedAt ? [file, here] : [here, file];
+  const looked = (t: Title) => [t.syncedAt, t.enrichedAt].filter(Boolean).sort().at(-1) ?? '';
+  const out: Title = { ...(looked(file) > looked(here) ? file : here), updatedAt: newer.updatedAt, addedAt: [here.addedAt, file.addedAt].sort()[0], edited: {} };
+  for (const f of USER_FIELDS) {
+    const [h, o] = [here.edited?.[f], file.edited?.[f]];
+    const from = h || o ? ((h ?? '') >= (o ?? '') ? here : file) : newer;
+    for (const k of f === 'expectation' ? ([f, 'expectedAt'] as const) : [f]) {
+      const v = h || o ? from[k] : (newer[k] ?? older[k]);
+      if (v === undefined) delete out[k];
+      else (out as unknown as Rec)[k] = v;
+    }
+    if (h || o) out.edited![f] = [h, o].filter(Boolean).sort().at(-1);
+  }
+  // What happened, rather than what you chose: known to one side is known. Scores were seen when they were first seen.
+  for (const k of ['finishedAt', 'chosenAt'] as const) if (newer[k] ?? older[k]) out[k] = newer[k] ?? older[k];
+  const saw = [here.scoresAt, file.scoresAt].filter((x) => !!x).sort()[0];
+  if (saw) out.scoresAt = saw;
+  // Writing is not replaceable: a note here that loses to a different one in the file is kept below it.
+  const [mine, theirs] = [here.note?.trim(), out.note?.trim()];
+  if (mine && theirs && !theirs.includes(mine)) out.note = `${theirs}\n\n— also noted on this device —\n${mine}`;
+  return out;
+}
+
+async function merge(file: Record<StoreName, unknown[]>): Promise<Restored> {
+  const r: Restored = { mode: 'merge', added: 0, updated: 0, marks: 0, links: 0, watches: 0, leftOut: 0 };
+  const gone = new Map((await db.removed.toArray()).map((x) => [x.key, x.at]));
+  const wasRemoved = (key: string, at: string) => (gone.get(key) ?? '') >= at;
+  const here = new Map((await db.titles.toArray()).map((t) => [t.id, t]));
+  const shared = new Set<string>();
+  for (const t of file.titles as Title[]) {
+    const mine = here.get(t.id);
+    if (mine) {
+      shared.add(t.id);
+      const next = mergeTitle(mine, t);
+      if (JSON.stringify(sorted(next)) !== JSON.stringify(sorted(mine))) r.updated++;
+      await db.titles.put(next);
+    } else if (wasRemoved(`title:${t.id}`, t.updatedAt)) {
+      r.leftOut++;
+      continue;
+    } else {
+      await db.titles.put(t);
+      r.added++;
+    }
+    here.set(t.id, t);
+  }
+  const known = <T extends { titleId: string }>(rows: unknown[]) => (rows as T[]).filter((x) => here.has(x.titleId));
+
+  // A series already here keeps its own episode list (it is the fresher one), unless it has none.
+  const slot = (e: Pick<Episode, 'season' | 'number'>) => `${e.season}x${e.number}`;
+  const fileEps = known<Episode>(file.episodes);
+  const local = new Map<string, Map<string, number>>();
+  for (const id of shared) local.set(id, new Map((await db.episodes.where('titleId').equals(id).toArray()).map((e) => [slot(e), e.id])));
+  await db.episodes.bulkPut(fileEps.filter((e) => !local.get(e.titleId)?.size));
+
+  // The file's marks, moved onto this device's episode in the same place. Marks here are never taken away.
+  const fileSlot = new Map(fileEps.map((e) => [e.id, slot(e)]));
+  const seen = new Set(await db.seen.toCollection().primaryKeys());
+  const touched = new Set<string>();
+  for (const m of known<Seen>(file.seen)) {
+    const id = local.get(m.titleId)?.get(fileSlot.get(m.episodeId) ?? '') ?? m.episodeId;
+    if (seen.has(id)) continue;
+    if (wasRemoved(`seen:${id}`, m.seenAt) || wasRemoved(`seen:${m.episodeId}`, m.seenAt)) {
+      r.leftOut++;
+      continue;
+    }
+    seen.add(id);
+    touched.add(m.titleId);
+    await db.seen.put({ ...m, episodeId: id });
+    r.marks++;
+  }
+
+  const links = await db.links.toArray();
+  const sameLink = (a: Link, b: Link) => a.id === b.id || (a.titleId === b.titleId && a.season === b.season && a.episode === b.episode && a.url === b.url);
+  for (const l of known<Link>(file.links)) {
+    if (links.some((x) => sameLink(x, l))) continue;
+    if (wasRemoved(`link:${l.id}`, l.usedAt ?? l.addedAt)) r.leftOut++;
+    else links.push(l), await db.links.put(l), r.links++;
+  }
+  const watches = await db.watches.toArray();
+  for (const w of known<Watch>(file.watches)) {
+    if (watches.some((x) => x.id === w.id || (x.titleId === w.titleId && x.date === w.date))) continue;
+    if (gone.has(`watch:${w.id}`)) r.leftOut++;
+    else watches.push(w), await db.watches.put(w), r.watches++;
+  }
+  // Everything else: what is here stays; only what is missing is added.
+  for (const s of ['dismissed', 'settings', 'removed'] as const) {
+    const key = CHECKS[s].key;
+    const have = new Set<unknown>(await db.table(s).toCollection().primaryKeys());
+    await db.table(s).bulkAdd((file[s] as Rec[]).filter((x) => !have.has(x[key]) && x[key] !== UNDO_KEY && !(s === 'removed' && outlived(x as unknown as Removed, here, seen))));
+  }
+  for (const id of touched) {
+    const t = await db.titles.get(id);
+    if (t?.status === 'want') await db.titles.update(id, { status: 'watching' });
+    await reconcile(id, false);
+  }
+  for (const id of shared) if (!touched.has(id)) await reconcile(id, false);
+  return r;
+}
+
+const sorted = (t: Title) => Object.fromEntries(Object.entries(t).filter(([k, v]) => v !== undefined && !(k === 'edited' && !Object.keys(v as object).length)).sort(([a], [b]) => a.localeCompare(b)));
+/** A removal recorded elsewhere, of something that is still here: merging takes nothing away. */
+const outlived = (x: Removed, titles: Map<string, Title>, seen: Set<number>) =>
+  (x.key.startsWith('title:') && titles.has(x.key.slice(6))) || (x.key.startsWith('seen:') && seen.has(Number(x.key.slice(5))));
+
+/** Nothing recorded since: the copy from before the last restore is still the one worth keeping. */
+async function untouchedSince(at: string) {
+  return !(await db.titles.where('updatedAt').above(at).count()) && !(await db.links.filter((l) => l.addedAt > at).count()) && !(await db.removed.filter((x) => x.at > at).count());
+}
+
+/**
+ * merge: keeps everything here and adds what the file has (see mergeTitle). replace: this device becomes
+ * exactly the file. Either way it is all or nothing, and what was here before is kept aside first, so the
+ * restore can be undone. Two replaces in a row keep the copy from before the first.
+ */
+export async function restore(backup: Backup, mode: 'merge' | 'replace', undoKind: UndoCopy['kind'] | null = 'restore'): Promise<Restored> {
+  if (mode === 'replace' && backup.damaged) throw new Error('This file has records that cannot be read, so it cannot replace everything. Merge it instead.');
+  return db.transaction('rw', STORES.map((s) => db.table(s)), async () => {
+    const prev = (await db.settings.get(UNDO_KEY))?.value as UndoCopy | undefined;
+    const keepPrev = mode === 'replace' && undoKind === 'restore' && prev?.kind === 'restore' && (await untouchedSince(prev.at));
+    const before = keepPrev ? prev.data : undoKind ? await snapshot() : undefined;
+    let result: Restored;
     if (mode === 'replace') {
       for (const s of STORES) {
         await db.table(s).clear();
-        await db.table(s).bulkAdd(backup.data[s]);
+        await db.table(s).bulkAdd(backup.data[s] ?? []);
       }
-    } else {
-      const incoming = backup.data.titles as Title[];
-      const existing = new Map((await db.titles.bulkGet(incoming.map((t) => t.id))).filter(Boolean).map((t) => [t!.id, t!]));
-      await db.titles.bulkPut(incoming.filter((t) => !existing.has(t.id) || existing.get(t.id)!.updatedAt <= t.updatedAt));
-      const fileEps = backup.data.episodes as Episode[];
-      await db.episodes.bulkPut(fileEps.filter((e) => !existing.has(e.titleId)));
-      // The file's marks for a series already here, moved onto this device's episode in the same slot.
-      const slot = (e: Pick<Episode, 'season' | 'number'>) => `${e.season}x${e.number}`;
-      const fileSlot = new Map(fileEps.map((e) => [e.id, slot(e)]));
-      const local = new Map<string, Map<string, number>>();
-      for (const id of existing.keys()) {
-        if (existing.get(id)!.kind !== 'show') continue;
-        merged.push(id);
-        local.set(id, new Map((await db.episodes.where('titleId').equals(id).toArray()).map((e) => [slot(e), e.id])));
-      }
-      const marks = (backup.data.seen as Seen[]).map((m) => {
-        const to = local.get(m.titleId)?.get(fileSlot.get(m.episodeId) ?? '');
-        return to ? { ...m, episodeId: to } : m;
-      });
-      const haveSeen = new Set(await db.seen.toCollection().primaryKeys());
-      await db.seen.bulkAdd([...new Map(marks.filter((m) => !haveSeen.has(m.episodeId)).map((m) => [m.episodeId, m])).values()]);
-      // Everything else: records already here are kept as they are; only missing ones are added.
-      for (const s of ['watches', 'links', 'dismissed', 'settings'] as const) {
-        const key = CHECKS[s].key;
-        const have = new Set(await db.table(s).toCollection().primaryKeys());
-        await db.table(s).bulkAdd((backup.data[s] as Rec[]).filter((r) => !have.has(r[key] as never) && r[key] !== UNDO_KEY));
-      }
-    }
+      const n = (s: StoreName) => backup.data[s]?.length ?? 0;
+      result = { mode, added: n('titles'), updated: 0, marks: n('seen'), links: n('links'), watches: n('watches'), leftOut: 0 };
+    } else result = await merge(backup.data);
     if (before && undoKind) await db.settings.put({ key: UNDO_KEY, value: { at: now(), data: before, kind: undoKind } satisfies UndoCopy });
+    return result;
   });
-  for (const id of merged) await reconcile(id, false);
 }
 
 export async function undoInfo(): Promise<{ at: string; kind: 'restore' | 'undo' } | null> {

@@ -1,13 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Dexie from 'dexie';
   import { route } from './lib/router.svelte';
-  import { ui, clock } from './lib/ui.svelte';
-  import { syncShows, reconcileShows } from './lib/actions';
+  import { ui, clock, toast, errorText } from './lib/ui.svelte';
+  import { syncShows, reconcileShows, refreshFilms } from './lib/actions';
   import Search from './components/Search.svelte';
+  import Toast from './components/Toast.svelte';
+  import SourceSheet from './components/SourceSheet.svelte';
   import Tonight from './routes/Tonight.svelte';
   import Calendar from './routes/Calendar.svelte';
   import Library from './routes/Library.svelte';
   import TitlePage from './routes/TitlePage.svelte';
+  import Discover from './routes/Discover.svelte';
   import Taste from './routes/Taste.svelte';
   import Settings from './routes/Settings.svelte';
   import Person from './routes/Person.svelte';
@@ -17,10 +21,14 @@
     { href: '#/', path: '/', label: 'Tonight', icon: 'M4 18h16M6 14l3-8 3 5 3-3 3 6' },
     { href: '#/calendar', path: '/calendar', label: 'Calendar', icon: 'M4 6h16v14H4zM4 10h16M8 3v4M16 3v4' },
     { href: '#/library', path: '/library', label: 'Library', icon: 'M5 4h3v16H5zM10 4h3v16h-3zM15 5l3-1 3 15-3 1z' },
-    { href: '#/taste', path: '/taste', label: 'Taste', icon: 'M12 3v18M5 8c0-3 3-5 7-5s7 2 7 5-3 5-7 5-7 2-7 5 3 5 7 5' },
+    { href: '#/discover', path: '/discover', label: 'Discover', icon: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M15.5 8.5l-2 5-5 2 2-5z' },
   ];
 
-  const active = (p: string) => (p === '/' ? route.path === '/' : route.path.startsWith(p));
+  const active = (p: string) => (p === '/' ? route.path === '/' : route.path.startsWith(p) || (p === '/discover' && route.path === '/taste'));
+  const names: Record<string, string> = { '/': 'Tonight', '/calendar': 'Calendar', '/library': 'Library', '/discover': 'Discover', '/taste': 'Your taste', '/settings': 'Settings & backup', '/import': 'Import' };
+  $effect(() => {
+    document.title = names[route.path] ? `${names[route.path]} · Parde` : 'Parde'; // title pages add their own
+  });
 
   async function sync() {
     try {
@@ -30,6 +38,7 @@
     }
     // Episodes already listed can come out without TVmaze changing anything.
     await reconcileShows().catch(() => {});
+    await refreshFilms().catch(() => {}); // busy or offline: tried again later
   }
 
   onMount(() => {
@@ -50,7 +59,13 @@
       }
     };
     addEventListener('keydown', onKey);
+    // A storage failure not caught where it happened is a save that did not happen: never silent.
+    const onFail = (e: PromiseRejectionEvent) => {
+      if (e.reason instanceof Dexie.DexieError) toast(`Not saved: ${errorText(e.reason)}`, 'error');
+    };
+    addEventListener('unhandledrejection', onFail);
     return () => {
+      removeEventListener('unhandledrejection', onFail);
       clearInterval(tick);
       document.removeEventListener('visibilitychange', onVisible);
       removeEventListener('keydown', onKey);
@@ -87,12 +102,20 @@
 </header>
 
 <main id="main" tabindex="-1">
+  {#if ui.storageError}
+    <div class="card" role="alert">
+      <p><strong>Parde cannot read your collection just now.</strong> {ui.storageError} Nothing has been lost: reloading usually fixes it.</p>
+      <button class="primary" onclick={() => location.reload()}>Reload</button>
+    </div>
+  {/if}
   {#if route.path === '/'}
     <Tonight />
   {:else if route.path === '/calendar'}
     <Calendar />
   {:else if route.path === '/library'}
     <Library />
+  {:else if route.path === '/discover'}
+    <Discover />
   {:else if route.path === '/taste'}
     <Taste />
   {:else if route.path === '/settings'}
@@ -122,16 +145,9 @@
 </nav>
 
 <Search />
+<SourceSheet />
 
-{#if ui.toast}
-  <div class="toast fade" class:error={ui.toast.tone === 'error'} role="status" aria-live="polite">
-    <span>{ui.toast.text}</span>
-    {#if ui.toast.action}
-      {@const a = ui.toast.action}
-      <button class="small" onclick={() => { a.run(); ui.toast = null; }}>{a.label}</button>
-    {/if}
-  </div>
-{/if}
+<Toast />
 
 <style>
   .skip { position: absolute; left: -9999px; }
@@ -171,14 +187,4 @@
     .bottom a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; height: var(--nav-h); color: var(--muted); text-decoration: none; font-size: 0.75rem; }
     .bottom a[aria-current='page'] { color: var(--accent); }
   }
-  .toast {
-    position: fixed; left: 50%; transform: translateX(-50%);
-    bottom: calc(var(--nav-h) + 1rem + env(safe-area-inset-bottom));
-    z-index: 60; display: flex; gap: 0.75rem; align-items: center;
-    background: var(--text); color: var(--bg); padding: 0.6rem 1rem; border-radius: 999px;
-    max-width: calc(100vw - 2rem); box-shadow: 0 6px 24px rgb(0 0 0 / 0.3);
-  }
-  .toast.error { background: var(--danger); color: #1a0d08; }
-  .toast button { background: transparent; color: inherit; border-color: currentColor; }
-  @media (min-width: 721px) { .toast { bottom: 1.5rem; } }
 </style>

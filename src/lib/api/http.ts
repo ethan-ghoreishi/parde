@@ -46,7 +46,24 @@ export async function getJson<T>(url: string, timeoutMs = 15000, retries = 0): P
     }
     if (res.status === 429) throw new NetError(`${host} is busy (too many requests). Try again in a minute.`, 429);
     if (!res.ok) throw new NetError(`${host} replied ${res.status}.`, res.status);
-    return (await res.json()) as T;
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (e) {
+      // A sign-in page on public Wi-Fi, a proxy, a cut-off reply.
+      throw new NetError(`${host} sent something unreadable. Check your connection.`, undefined, { cause: e });
+    }
+    // MediaWiki reports failures with a 200: without this they look like "nothing found".
+    const err = WIKIMEDIA.test(host) ? (body as { error?: { code?: string } } | null)?.error : undefined;
+    if (err) {
+      const busy = /^(maxlag|ratelimited|readonly)$/.test(err.code ?? '');
+      if (busy && attempt < retries) {
+        await sleep(5000 * 2 ** attempt);
+        continue;
+      }
+      throw new NetError(busy ? `${host} is busy. Try again in a minute.` : `${host} could not answer (${err.code ?? 'error'}).`, busy ? 429 : undefined);
+    }
+    return body as T;
   }
 }
 

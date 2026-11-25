@@ -152,11 +152,25 @@ const ROLE_PROPS: [string, Role, number][] = [
   ['P86', 'composer', 2],
 ];
 
-const CRITICS: Record<string, { source: string; methods?: string[] }> = {
-  Q105584: { source: 'Rotten Tomatoes', methods: ['Q108403393'] }, // Tomatometer, not audience score
-  Q150248: { source: 'Metacritic', methods: ['Q106515043'] }, // Metascore, not user score
-  Q37312: { source: 'IMDb' },
+const ROTTEN = 'Q105584';
+const METACRITIC = 'Q150248';
+const IMDB = 'Q37312';
+/** Each is a different measurement, so each is its own source, never averaged or compared with another. */
+const METHODS: Record<string, string> = {
+  Q108403393: 'Rotten Tomatoes', // Tomatometer: the share of critics who were positive
+  Q108403540: 'Rotten Tomatoes average', // the critics' average rating
+  Q131100566: 'Rotten Tomatoes audience', // Popcornmeter: almost never on Wikidata
+  Q106515043: 'Metacritic', // Metascore
 };
+
+/** What a review score measures, or undefined if the statement does not say. */
+function sourceOf(by: string | undefined, method: string | undefined, value: string): string | undefined {
+  if (by === IMDB) return 'IMDb';
+  const s = method && METHODS[method];
+  if (s) return by === (s === 'Metacritic' ? METACRITIC : ROTTEN) ? s : undefined;
+  // Out of 100, Metacritic can only be the Metascore (its users rate out of 10). Rotten Tomatoes has three kinds of score: do not guess.
+  return by === METACRITIC && !method && /\/\s*100$/.test(value) ? 'Metacritic' : undefined;
+}
 
 export function normaliseScore(value: string): number | undefined {
   const pct = value.match(/^\s*(\d+(?:\.\d+)?)\s*%\s*$/);
@@ -166,24 +180,21 @@ export function normaliseScore(value: string): number | undefined {
   return undefined;
 }
 
-/** Latest score per critic source, by point-in-time qualifier (P585). */
+/** Latest score per source, by point-in-time qualifier (P585). */
 export function parseCritics(claims: Claims): CriticScore[] {
   const best = new Map<string, { c: CriticScore; at: string }>();
   for (const cl of live(claims.P444)) {
-    const by = itemId(cl.qualifiers?.P447?.[0]);
-    const def = by && CRITICS[by];
     const value = str(cl.mainsnak);
-    if (!def || !value) continue;
-    const method = itemId(cl.qualifiers?.P459?.[0]);
-    if (def.methods && method && !def.methods.includes(method)) continue;
+    const source = value && sourceOf(itemId(cl.qualifiers?.P447?.[0]), itemId(cl.qualifiers?.P459?.[0]), value);
+    if (!value || !source) continue;
     // A series' score for one season (P4908) says nothing certain about the whole show.
     if (cl.qualifiers?.P4908) continue;
     const score = normaliseScore(value);
     if (score === undefined || score > 100) continue;
     const at = ((cl.qualifiers?.P585?.[0]?.datavalue?.value as { time?: string })?.time ?? '').replace(/^\+/, '');
     const asOf = /^\d{4}-\d{2}/.test(at) && !at.startsWith('0000') ? at.slice(0, at.slice(5, 7) === '00' ? 4 : 7) : undefined;
-    const prev = best.get(def.source);
-    if (!prev || at > prev.at) best.set(def.source, { c: { source: def.source, value, score, ...(asOf ? { asOf } : {}) }, at });
+    const prev = best.get(source);
+    if (!prev || at > prev.at) best.set(source, { c: { source, value, score, ...(asOf ? { asOf } : {}) }, at });
   }
   return [...best.values()].map((b) => b.c);
 }
@@ -248,33 +259,35 @@ type Entity = {
 };
 
 async function entities(ids: string[], props: string, retries = 0): Promise<Record<string, Entity>> {
-  const out: Record<string, Entity> = {};
-  for (let i = 0; i < ids.length; i += 50) {
-    const res = await getJson<{ entities: Record<string, Entity> }>(
-      `${WD}?${qs({
-        action: 'wbgetentities', format: 'json', origin: '*', ids: ids.slice(i, i + 50).join('|'),
-        props, languages: 'en|mul', languagefallback: 1, sitefilter: 'enwiki',
-      })}`,
-      30000,
-      retries,
-    );
-    Object.assign(out, res.entities);
-  }
-  return out;
+  const batches = Array.from({ length: Math.ceil(ids.length / 50) }, (_, i) => ids.slice(i * 50, i * 50 + 50));
+  const replies = await Promise.all(
+    batches.map((b) =>
+      getJson<{ entities: Record<string, Entity> }>(
+        `${WD}?${qs({
+          action: 'wbgetentities', format: 'json', origin: '*', ids: b.join('|'),
+          props, languages: 'en|mul', languagefallback: 1, sitefilter: 'enwiki',
+        })}`,
+        30000,
+        retries,
+      ),
+    ),
+  );
+  return Object.assign({}, ...replies.map((r) => r.entities));
 }
 
 const label = (e: Entity | undefined) => e?.labels?.en?.value ?? e?.labels?.mul?.value;
 
 
-/**
- * Knowledge-graph metadata for Wikidata items (films or series), 50 per request: one request for
- * the items, then one per 50 people, genres and places that need a name.
- */
-export async function wikidataMetas(qids: string[], retries = 0) {
+/** Wikidata items with everything that can be read without looking up names. */
+async function parsedItems(qids: string[], retries: number) {
   const items = await entities(qids, 'claims|labels|sitelinks', retries);
-  const parsed = qids.flatMap((q) => (items[q] && items[q].missing === undefined ? [{ q, e: items[q], p: parseClaims(items[q].claims ?? {}) }] : []));
+  return qids.flatMap((q) => (items[q] && items[q].missing === undefined ? [{ q, e: items[q], p: parseClaims(items[q].claims ?? {}) }] : []));
+}
+
+/** One more request per 50 people, genres and places that need a name. */
+async function named(parsed: Awaited<ReturnType<typeof parsedItems>>, retries: number) {
   const need = [...new Set(parsed.flatMap(({ p }) => [...p.people.map((x) => x.qid), ...p.genreIds, ...p.subjectIds, ...p.countryIds, ...p.languageIds]))];
-  const labels = need.length ? await entities(need, 'labels', retries) : {};
+  const labels = await entities(need, 'labels', retries);
   const names = (ids: string[]) => ids.map((id) => label(labels[id])).filter((x): x is string => !!x);
   return new Map(
     parsed.map(({ q, e, p }) => [
@@ -298,6 +311,9 @@ export async function wikidataMetas(qids: string[], retries = 0) {
     ]),
   );
 }
+
+/** Knowledge-graph metadata for Wikidata items (films or series), 50 per request. */
+export const wikidataMetas = async (qids: string[], retries = 0) => named(await parsedItems(qids, retries), retries);
 
 export async function wikidataMeta(qid: string) {
   const m = (await wikidataMetas([qid])).get(qid);
@@ -325,8 +341,9 @@ async function intros(titles: string[], retries = 0): Promise<Map<string, { post
 
 /** Everything Parde keeps about these films. Missing or deleted items are left out of the map. */
 export async function filmMetas(qids: string[], retries = 0): Promise<Map<string, Meta>> {
-  const wd = await wikidataMetas(qids, retries);
-  const wp = await intros([...wd.values()].map((m) => m.wiki).filter((x): x is string => !!x), retries).catch(() => new Map());
+  const items = await parsedItems(qids, retries);
+  const articles = items.map(({ e }) => e.sitelinks?.enwiki?.title).filter((x): x is string => !!x);
+  const [wd, wp] = await Promise.all([named(items, retries), intros(articles, retries).catch(() => new Map<string, { poster?: string; extract?: string }>())]);
   return new Map(
     [...wd].map(([qid, m]) => {
       const intro = (m.wiki && wp.get(m.wiki)) || {};
@@ -366,10 +383,22 @@ export interface Credit {
   roles: CreditRole[];
   /** Who of the people asked about made it */
   via: string;
+  /** Wikipedia language editions with an article: a rough measure of how widely known it is */
+  known?: number;
 }
 
-const FILM_TYPES = ['Q11424', 'Q24869', 'Q202866', 'Q29168811', 'Q93204', 'Q506240', 'Q226730'];
-const SHOW_TYPES = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
+/** Wikidata types that are a film (feature, animated, silent, documentary, TV, short…) or a series. */
+export const FILM_TYPES = ['Q11424', 'Q24869', 'Q202866', 'Q29168811', 'Q93204', 'Q506240', 'Q226730', 'Q24862', 'Q20650540'];
+export const SHOW_TYPES = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
+
+type Binding = Record<string, { value: string }>;
+/** SPARQL string literal: escape backslashes and quotes; a raw line break would be a syntax error. */
+export const lit = (s: string) => `"${s.replace(/[\u0000-\u001f]/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+export async function sparql(query: string, timeoutMs = 30000, retries = 0): Promise<Binding[]> {
+  const res = await getJson<{ results: { bindings: Binding[] } }>(`https://query.wikidata.org/sparql?${qs({ format: 'json', query })}`, timeoutMs, retries);
+  return res.results.bindings;
+}
 
 /**
  * Films and series these people directed, wrote, created or acted in, from the Wikidata Query Service.
@@ -378,27 +407,22 @@ const SHOW_TYPES = ['Q5398426', 'Q1259759', 'Q526877', 'Q117467246', 'Q581714'];
 export async function credits(people: string[], roles: CreditRole[] = ['directed', 'wrote', 'created', 'acted']): Promise<Credit[]> {
   if (!people.length) return [];
   const props = Object.entries(ROLE_OF).filter(([, r]) => roles.includes(r)).map(([p]) => `wdt:${p}`);
-  const query = `SELECT ?w ?wLabel ?prop ?type ?person (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) (SAMPLE(?a) AS ?article) WHERE {
+  return parseCredits(await sparql(`SELECT ?w ?wLabel ?prop ?type ?person ?l (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) (SAMPLE(?a) AS ?article) WHERE {
   VALUES ?person { ${people.map((q) => `wd:${q}`).join(' ')} }
   VALUES ?prop { ${props.join(' ')} }
   VALUES ?type { ${[...FILM_TYPES, ...SHOW_TYPES].map((q) => `wd:${q}`).join(' ')} }
-  ?w ?prop ?person; wdt:P31 ?type.
+  ?w ?prop ?person; wdt:P31 ?type; wikibase:sitelinks ?l.
   OPTIONAL { ?w wdt:P577|wdt:P580 ?d }
   OPTIONAL { ?w wdt:P8600 ?tv }
   OPTIONAL { ?a schema:about ?w; schema:isPartOf <https://en.wikipedia.org/> }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en,mul". }
-} GROUP BY ?w ?wLabel ?prop ?type ?person LIMIT 3000`;
-  const res = await getJson<{ results: { bindings: Record<string, { value: string }>[] } }>(
-    `https://query.wikidata.org/sparql?${qs({ format: 'json', query })}`,
-    30000,
-  );
-  return parseCredits(res.results.bindings);
+} GROUP BY ?w ?wLabel ?prop ?type ?person ?l LIMIT 3000`));
 }
 
 const tail = (u: string) => u.slice(u.lastIndexOf('/') + 1);
 const ORDER: CreditRole[] = ['directed', 'created', 'wrote', 'acted'];
 
-export function parseCredits(bindings: Record<string, { value: string }>[]): Credit[] {
+export function parseCredits(bindings: Binding[]): Credit[] {
   const out = new Map<string, Credit>();
   for (const b of bindings) {
     const qid = tail(b.w.value);
@@ -410,10 +434,11 @@ export function parseCredits(bindings: Record<string, { value: string }>[]): Cre
       name,
       kind: SHOW_TYPES.includes(tail(b.type.value)) ? 'show' : 'film',
       year: b.y?.value ? Number(b.y.value) : undefined,
-      wiki: b.article ? decodeURIComponent(b.article.value.split('/wiki/')[1] ?? '').replace(/_/g, ' ') || undefined : undefined,
+      wiki: article(b.article?.value),
       tvmaze: Number(b.tvm?.value) || undefined,
       roles: [],
       via: tail(b.person.value),
+      known: Number(b.l?.value) || 0,
     };
     if (SHOW_TYPES.includes(tail(b.type.value))) c.kind = 'show';
     if (role && !c.roles.includes(role)) c.roles.push(role);
@@ -422,6 +447,60 @@ export function parseCredits(bindings: Record<string, { value: string }>[]): Cre
   }
   return [...out.values()];
 }
+
+/** A title on a shelf, before anything more is looked up. */
+export interface Find {
+  qid: string;
+  name: string;
+  kind: 'film' | 'show';
+  year?: number;
+  tvmaze?: number;
+  known?: number;
+  /** English Wikipedia article, for its poster */
+  wiki?: string;
+}
+
+const article = (url: string | undefined) => (url ? decodeURIComponent(url.split('/wiki/')[1] ?? '').replace(/_/g, ' ') || undefined : undefined);
+const typeList = [...FILM_TYPES, ...SHOW_TYPES].map((q) => `wd:${q}`).join(', ');
+
+/**
+ * Films and series found by `inner` (which binds ?f, ?l and ?score), most related and best known first.
+ * The named subquery is evaluated first and types are a filter: as a join, the service lists every film there is.
+ */
+async function find(inner: string): Promise<Find[]> {
+  const rows = await sparql(`SELECT ?f ?fLabel ?l ?score (GROUP_CONCAT(DISTINCT STR(?type)) AS ?types) (MIN(YEAR(?d)) AS ?y) (SAMPLE(?tv) AS ?tvm) (SAMPLE(?a) AS ?article)
+WITH { ${inner} } AS %found
+WHERE {
+  INCLUDE %found
+  ?f wdt:P31 ?type. FILTER(?type IN (${typeList}))
+  OPTIONAL { ?f wdt:P577 ?d }
+  OPTIONAL { ?f wdt:P580 ?d }
+  OPTIONAL { ?f wdt:P8600 ?tv }
+  OPTIONAL { ?a schema:about ?f; schema:isPartOf <https://en.wikipedia.org/> }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en,mul". }
+} GROUP BY ?f ?fLabel ?l ?score ORDER BY DESC(?score) DESC(?l)`);
+  return rows.flatMap((b) => {
+    const name = b.fLabel?.value;
+    if (!name || /^Q\d+$/.test(name)) return [];
+    const show = b.types.value.split(' ').some((t) => SHOW_TYPES.includes(tail(t)));
+    return [{ qid: tail(b.f.value), name, kind: show ? 'show' as const : 'film' as const, year: Number(b.y?.value) || undefined, tvmaze: Number(b.tvm?.value) || undefined, known: Number(b.l.value) || 0, wiki: article(b.article?.value) }];
+  });
+}
+
+/** What shares its makers, subject, source or cast with a title: the same director counts for more than one actor. */
+export const neighbours = (qid: string) =>
+  find(`SELECT ?f ?l (SUM(?w) AS ?score) WHERE {
+    VALUES (?p ?w) { (wdt:P57 4) (wdt:P170 4) (wdt:P58 2) (wdt:P921 2) (wdt:P144 2) (wdt:P161 1) }
+    wd:${qid} ?p ?x. ?f ?p ?x; wikibase:sitelinks ?l. FILTER(?f != wd:${qid} && ?l > 4)
+  } GROUP BY ?f ?l ORDER BY DESC(?score) DESC(?l) LIMIT 150`);
+
+/** What Wikidata says is about this subject (its exact English name). */
+export const aboutSubject = (name: string) =>
+  find(`SELECT DISTINCT ?f ?l (1 AS ?score) WHERE { ?x rdfs:label ${lit(name)}@en. ?f wdt:P921 ?x; wdt:P31 ?t; wikibase:sitelinks ?l. FILTER(?l > 4 && ?t IN (${typeList})) } ORDER BY DESC(?l) LIMIT 120`);
+
+/** The best-known films and series from a country. */
+export const fromCountry = (qid: string) =>
+  find(`SELECT DISTINCT ?f ?l (1 AS ?score) WHERE { ?f wdt:P495 wd:${qid}; wikibase:sitelinks ?l. FILTER(?l > 12) ?f wdt:P31 ?t. FILTER(?t IN (${typeList})) } ORDER BY DESC(?l) LIMIT 120`);
 
 export interface PersonInfo {
   qid: string;

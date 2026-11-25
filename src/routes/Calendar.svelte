@@ -1,24 +1,26 @@
 <script lang="ts">
   import { db, now, type Episode, type Link, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { code, dayKey, isAired, localDay, localTime, release, byOrder } from '../lib/schedule';
+  import { code, dayKey, isAired, isListed, localDay, localTime, onCalendar, release, byOrder } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
-  import { setSeen, editLink, syncShows } from '../lib/actions';
+  import { openSheet } from '../components/SourceSheet.svelte';
+  import { setSeen, setSeenAll, editLink, syncShows, type Undo } from '../lib/actions';
   import { route, go, titleHref } from '../lib/router.svelte';
   import { formatDay } from '../lib/format';
-  import { toast, errorText, clock } from '../lib/ui.svelte';
+  import { toast, undoable, errorText, clock } from '../lib/ui.svelte';
   import Poster from '../components/Poster.svelte';
 
   const data = live(
     () => async () => {
-      const shows = (await db.titles.where('kind').equals('show').toArray()).filter((t) => t.followed);
+      const shows = (await db.titles.where('kind').equals('show').toArray()).filter(onCalendar);
       const ids = shows.map((t) => t.id);
       const [episodes, seen, links] = await Promise.all([
         db.episodes.where('titleId').anyOf(ids).toArray(),
         db.seen.where('titleId').anyOf(ids).primaryKeys(),
         db.links.where('titleId').anyOf(ids).toArray(),
       ]);
-      return { shows, episodes, seen: new Set(seen), links };
+      const marks = new Set(seen);
+      return { shows, episodes: episodes.filter((e) => isListed(e, marks)), seen: marks, links };
     },
     { shows: [] as Title[], episodes: [] as Episode[], seen: new Set<number>(), links: [] as Link[] },
   );
@@ -107,14 +109,19 @@
 
   async function open(e: Episode) {
     const src = sourceFor(e);
-    if (!src) return go(titleHref(e.titleId).slice(1));
-    if (openExternal(src.url)) await editLink(src.link.id, { usedAt: now() });
-    else toast('That saved link is not valid. Edit it on the series page.', 'error');
+    if (src && openExternal(src.url)) await editLink(src.link.id, { usedAt: now() });
+    else toast('That saved link is not valid. Edit it under Sources.', 'error');
   }
 
-  async function allSeen(eps: Episode[]) {
-    for (const e of eps.filter((x) => isAired(x) && !data.value.seen.has(x.id))) await setSeen(e, true);
+  async function act(text: string, run: () => Promise<Undo>) {
+    try {
+      undoable(text, await run());
+    } catch (e) {
+      toast(`Not saved: ${errorText(e)}`, 'error');
+    }
   }
+  const allSeen = (t: Title, eps: Episode[]) => act(`${t.name}: ${eps.length} episodes seen`, () => setSeenAll(t.id, eps.filter((e) => isAired(e))));
+  const one = (t: Title, e: Episode, on: boolean) => act(`${t.name} ${code(e)} ${on ? 'seen' : 'unmarked'}`, () => setSeen(e, on));
 </script>
 
 <div class="spread">
@@ -184,14 +191,15 @@
             </div>
             <div class="acts">
               {#if eps.length === 1}
-                <label class="seen"><input type="checkbox" checked={!unseen.length} onchange={(ev) => setSeen(eps[0], ev.currentTarget.checked)} /> Seen</label>
+                <label class="seen"><input type="checkbox" checked={!unseen.length} onchange={(ev) => one(t, eps[0], ev.currentTarget.checked)} /> Seen</label>
               {:else if unseen.some((e) => isAired(e))}
-                <button class="small" onclick={() => allSeen(eps)}>All seen</button>
+                <button class="small" onclick={() => allSeen(t, eps)}>All seen</button>
               {:else if !unseen.length}
                 <span class="small muted">All seen</span>
               {/if}
               {#if first}
-                {#if src}<button class="small" onclick={() => open(first)}>Watch {eps.length > 1 ? code(first) : ''} ↗</button>{:else}<a class="btn small" href={titleHref(t.id)}>Add a source</a>{/if}
+                {#if src}<button class="small primary" onclick={() => open(first)}>Watch {eps.length > 1 ? code(first) : ''} ↗</button>{/if}
+                <button class="small" onclick={() => openSheet(t, first)} aria-label="Sources for {t.name} {code(first)}">{src ? 'Sources' : 'Add a source'}</button>
               {:else if !out}
                 <span class="small muted">Not out yet</span>
               {/if}
@@ -224,12 +232,19 @@
   .day.today { color: var(--accent); }
   .eps { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; }
   .eps li { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.75rem; }
-  .eps li.on { opacity: 0.6; }
+  .eps li.on .name, .eps li.on .small { color: var(--muted); }
   .info { flex: 1; min-width: 0; display: grid; gap: 0.25rem; }
   .name { color: var(--text); font-weight: 600; text-decoration: none; }
   .acts { display: grid; gap: 0.4rem; justify-items: end; }
   .seen { display: flex; gap: 0.35rem; align-items: center; color: var(--text); margin: 0; font-size: 0.9rem; }
-  .seen input { width: 20px; height: 20px; accent-color: var(--accent); }
   .note { margin-top: 1.5rem; line-height: 2; }
-  @media (max-width: 480px) { .week a { min-height: 56px; } .weeknav .icon { width: 32px; } }
+  @media (max-width: 480px) {
+    .week { gap: 0.1rem; }
+    .week a { min-height: 56px; }
+    .weeknav { gap: 0.2rem; }
+    .weeknav .icon { width: 34px; }
+    .eps li { flex-wrap: wrap; }
+    .info { flex-basis: 0; min-width: 8rem; }
+    .acts { width: 100%; display: flex; flex-wrap: wrap; align-items: center; }
+  }
 </style>

@@ -1,15 +1,15 @@
 <script lang="ts">
   import { db, getSetting, type Status, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
-  import { update, setStatus, setExpectation, refreshTitle, removeTitle, setSeen, seenUpTo, deleteWatch } from '../lib/actions';
-  import { progress, code, release, isAired, localDay, byOrder } from '../lib/schedule';
+  import { update, setStatus, setExpectation, refreshTitle, removeTitle, sawScores, setSeen, seenUpTo, deleteWatch, editLink, type Undo } from '../lib/actions';
+  import { progress, code, release, isAired, localDay, byOrder, onCalendar } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
-  import { EXPECTATIONS, criticScore, referenceText } from '../lib/taste';
-  import { questionsFor, reflectPrompt, reviewPrompt, recapPrompt, ASSISTANTS, type ReviewOptions } from '../lib/handoff';
-  import { toast, errorText, copy } from '../lib/ui.svelte';
+  import { EXPECTATIONS } from '../lib/taste';
+  import { premise } from '../lib/discover';
+  import { questionsFor, reflectPrompt, reviewPrompt, recapPrompt, finishedAll, ASSISTANTS, type ReviewOptions } from '../lib/handoff';
+  import { toast, undoable, errorText, copy } from '../lib/ui.svelte';
   import { go, personHref } from '../lib/router.svelte';
-  import { editLink } from '../lib/actions';
   import { now } from '../lib/db';
   import Poster from '../components/Poster.svelte';
   import Scale from '../components/Scale.svelte';
@@ -18,6 +18,8 @@
   import LogWatch from '../components/LogWatch.svelte';
   import ProgressPicker from '../components/ProgressPicker.svelte';
   import Themes from '../components/Themes.svelte';
+  import Scores from '../components/Scores.svelte';
+  import Drawn from '../components/Drawn.svelte';
 
   let { id }: { id: string } = $props();
 
@@ -37,7 +39,6 @@
   const best = $derived(nextSources.find((r) => !r.link.broken));
   const rel = $derived(t ? release(t) : { kind: 'unknown' as const });
   const recent = $derived(epsQ.value.filter((e) => seen.has(e.id) && e.summary).slice(-3));
-  const cs = $derived(t ? criticScore(t) : undefined);
   // One line per person: "Denis Villeneuve — director, writer"
   const makers = $derived(
     [...(t?.people.filter((p) => p.role !== 'cast') ?? []).reduce((m, p) => m.set(p.name, [...(m.get(p.name) ?? []), p.role]), new Map<string, string[]>())]
@@ -48,8 +49,12 @@
   const expectationLocked = $derived(
     !!t && (t.status === 'watched' || t.status === 'watching' || t.status === 'paused' || t.rating !== undefined || prog.seenCount > 0),
   );
-  const provenance = (c: { source: string; asOf?: string }) =>
-    `${c.source}${c.source === 'TVmaze' ? ' users' : ', via Wikidata'}${c.asOf ? `, as of ${c.asOf}` : ''}. Scores can be out of date.`;
+  /** Not started: what you need is what it is and where to find it, not somewhere to write about it */
+  const ahead = $derived(!!t && !expectationLocked && t.status !== 'dropped');
+  const finished = $derived(!!t && finishedAll(t, prog));
+  $effect(() => {
+    if (t) document.title = `${t.name} · Parde`;
+  });
 
   let logOpen = $state(false);
   let note = $state<string | undefined>(undefined);
@@ -59,12 +64,22 @@
   // Keep the draft local while typing; save on pause and on leaving the field.
   let noteTimer: ReturnType<typeof setTimeout>;
   function onNote() {
+    noteState = '';
     clearTimeout(noteTimer);
     noteTimer = setTimeout(saveNote, 800);
   }
+  let noteState = $state<'' | 'saving' | 'saved'>('');
   function saveNote() {
     clearTimeout(noteTimer);
-    if (t && note !== undefined && note !== (t.note ?? '')) update(t.id, { note });
+    if (!t || note === undefined || note === (t.note ?? '')) return;
+    noteState = 'saving';
+    update(t.id, { note }).then(
+      () => (noteState = 'saved'),
+      (e) => {
+        noteState = '';
+        toast(`Your note is not saved: ${errorText(e)}`, 'error');
+      },
+    );
   }
   $effect(() => {
     const flush = () => document.visibilityState === 'hidden' && saveNote();
@@ -103,10 +118,33 @@
   }
 
   async function remove() {
-    if (!t || !confirm(`Remove ${t.name} and everything you recorded about it (ratings, notes, sources, episode marks)? This cannot be undone.`)) return;
-    await removeTitle(t.id);
-    toast(`Removed ${t.name}`);
-    go('/library');
+    if (!t || !confirm(`Remove ${t.name} and everything you recorded about it (ratings, notes, sources, episode marks)?`)) return;
+    const name = t.name;
+    if (await act(`Removed ${name}`, () => removeTitle(id))) go('/library');
+  }
+
+  /** Save, then say so, with a way back. */
+  async function act(text: string, run: () => Promise<Undo>): Promise<boolean> {
+    try {
+      undoable(text, await run());
+      return true;
+    } catch (e) {
+      toast(`Not saved: ${errorText(e)}`, 'error');
+      return false;
+    }
+  }
+  async function pickStatus(s: Status, label: string) {
+    if (!t || t.status === s) return;
+    const marked = t.kind === 'show' && s === 'watched' && prog.unseenAired > 0;
+    await act(marked ? `Finished: ${prog.unseenAired} more episode${prog.unseenAired > 1 ? 's' : ''} marked seen` : `${t.name}: ${label.toLowerCase()}`, () => setStatus(t, s));
+  }
+  // The next episode takes this one's place on screen: a second tap just after must not mark it too.
+  let settling = $state(false);
+  async function seenNext() {
+    if (!next || settling) return;
+    settling = true;
+    await act(`${code(next)} seen`, () => setSeen(next, true));
+    setTimeout(() => (settling = false), 700);
   }
 
   /** Copy first (inside the tap, as browsers require), then open an empty chat to paste into. */
@@ -122,7 +160,7 @@
   const prompt = $derived.by(() => {
     if (!t) return '';
     const cur = { ...t, note: note ?? t.note };
-    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts) : reflectPrompt(cur, libraryQ.value);
+    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts, prog) : reflectPrompt(cur, libraryQ.value, prog);
   });
   function send(where: 'copy' | keyof typeof ASSISTANTS) {
     saveNote();
@@ -147,18 +185,14 @@
           <p class="muted">
             {[t.year, t.kind === 'film' ? 'Film' : 'Series', runtime(t.runtime) && (t.kind === 'show' ? `${runtime(t.runtime)} episodes` : runtime(t.runtime)), t.network ?? t.webChannel, t.showStatus === 'Ended' ? 'Ended' : ''].filter(Boolean).join(' · ')}
           </p>
-          {#if t.genres.length}<div class="row">{#each t.genres.slice(0, 5) as g}<a class="chip" href="#/library?genre={encodeURIComponent(g)}">{g}</a>{/each}</div>{/if}
+          {#if t.genres.length}<div class="row">{#each t.genres.slice(0, 4) as g}<a class="chip" href="#/library?genre={encodeURIComponent(g)}">{g}</a>{/each}</div>{/if}
         </div>
 
-        {#if t.critics.length}
-          <div class="row critics" aria-label="Scores">
-            {#each t.critics as c}<span class="chip" title={provenance(c)}><strong>{c.value}</strong> {c.source}{c.asOf ? ` · ${c.asOf.slice(0, 4)}` : ''}</span>{/each}
-          </div>
-        {/if}
+        {#if ahead && premise(t.overview)}<p class="premise">{premise(t.overview)}</p>{/if}
 
         <div class="row status" role="group" aria-label="Status">
           {#each statuses as [s, label]}
-            <button class="chip" class:on={t.status === s} aria-pressed={t.status === s} onclick={() => setStatus(t, s)}>{label}</button>
+            <button class="chip" class:on={t.status === s} aria-pressed={t.status === s} onclick={() => pickStatus(s, label)}>{label}</button>
           {/each}
         </div>
 
@@ -175,9 +209,9 @@
                 <button class="primary" onclick={openBest}>Watch on {best.link.label || hostOf(best.url)} ↗</button>
                 <button class="ghost small" onclick={() => copy(best.url)} aria-label="Copy the link for {code(next)}">Copy link</button>
               {/if}
-              <button onclick={() => setSeen(next, true)} disabled={!isAired(next)}>Mark {code(next)} seen</button>
+              <button onclick={seenNext} disabled={!isAired(next) || settling}>Mark {code(next)} seen</button>
             </div>
-            {#if !best}<p class="small muted">No source yet: open the episode below to add one, or save a whole-series pattern.</p>{/if}
+            {#if !best}<a class="small" href="#sources" onclick={(e) => { e.preventDefault(); document.getElementById('sources')?.scrollIntoView(); }}>Add where you watch it ↓</a>{/if}
             <ProgressPicker titleId={t.id} label={prog.seenCount ? 'Seen up to' : 'Seen some already? Up to'} />
           {:else if t.kind === 'show' && epsQ.value.length}
             <p>You are all caught up.{t.showStatus === 'Ended' ? '' : ' New episodes will appear on your calendar.'}</p>
@@ -194,7 +228,7 @@
           {#if t.kind === 'show' && prog.skipped}
             <p class="small muted">
               {prog.skipped} earlier episode{prog.skipped > 1 ? 's are' : ' is'} not marked seen.
-              <button class="small ghost" onclick={() => seenUpTo(prog.lastSeen!)}>Mark {prog.skipped > 1 ? 'them' : 'it'} seen</button>
+              <button class="small ghost" onclick={() => act(`Seen up to ${code(prog.lastSeen!)}`, () => seenUpTo(prog.lastSeen!))}>Mark {prog.skipped > 1 ? 'them' : 'it'} seen</button>
             </p>
           {/if}
         </div>
@@ -210,7 +244,7 @@
         {#each recent as e}
           <p class="small"><strong>{code(e)} {e.name}.</strong> {e.summary}</p>
         {/each}
-        <button class="small" onclick={() => handoff(recapPrompt(t, prog.lastSeen!))}>Fuller recap in Claude ↗</button>
+        <button class="small" onclick={() => handoff(recapPrompt(t, prog.lastSeen!, prog.skipped))}>Fuller recap in Claude ↗</button>
         <p class="small muted">Only episodes you have seen. Copies a prompt that asks for nothing past {code(prog.lastSeen!)} and opens a new Claude chat to paste it into.</p>
       </section>
     {/if}
@@ -219,12 +253,12 @@
       <div class="main-col">
         {#if expectationLocked}
           {#if t.expectation}
-            <p class="small muted">Before watching you were <strong>{EXPECTATIONS[t.expectation].toLowerCase()}</strong> after the trailer.</p>
+            <p class="small muted">Before watching you were <strong>{EXPECTATIONS[t.expectation].toLowerCase()}</strong> after the trailer.{t.drawn?.length ? ` What drew you: ${t.drawn.join(', ')}.` : ''}</p>
           {/if}
-        {:else}
+        {:else if ahead}
           <section class="section">
             <h2>After the trailer</h2>
-            <p class="small muted">How keen are you? Parde later compares this with how much you actually enjoyed it.</p>
+            <p class="small muted">How keen are you? Later you can see how often that turns out right.</p>
             <Scale max={5} value={t.expectation} labels={EXPECTATIONS} onpick={(v) => setExpectation(t.id, v)} name="Expectation" />
             <div class="row" style="margin-top: 0.75rem">
               {#if t.trailer}
@@ -238,34 +272,40 @@
               {/if}
               <a class="small" href={trailerSearch} target="_blank" rel="noopener noreferrer">{t.trailer ? 'Other trailers' : 'Find the trailer'} on YouTube ↗</a>
             </div>
+            <p class="small muted" style="margin: 1rem 0 0.4rem">What drew you? (optional)</p>
+            <Drawn id={t.id} value={t.drawn} />
           </section>
         {/if}
 
         {#if t.status === 'watched' || t.rating || t.status === 'watching' || t.status === 'dropped'}
           <section class="section">
-            <h2>Your verdict</h2>
+            <h2>Your rating</h2>
             <Scale max={10} value={t.rating} onpick={(v) => update(t.id, { rating: v })} name="Your rating" />
             {#if partnerQ.value || t.partnerRating}
               <p class="small muted" style="margin: 0.75rem 0 0.35rem">{partnerQ.value || 'Partner'}</p>
               <Scale max={10} value={t.partnerRating} onpick={(v) => update(t.id, { partnerRating: v })} name="Partner rating" />
             {/if}
-            {#if t.rating && cs}
-              <p class="small muted" style="margin-top: 0.5rem">{referenceText(cs)} · you {t.rating}/10{cs.source !== 'Rotten Tomatoes' && Math.abs(t.rating * 10 - cs.score) >= 20 ? ` — you liked it ${t.rating * 10 > cs.score ? 'more' : 'less'} than ${cs.kind === 'critics' ? 'critics' : 'most viewers'}` : ''}</p>
-            {/if}
           </section>
         {/if}
 
+        {#if t.critics.length}
+          <section class="section"><Scores critics={t.critics} open={!ahead && t.rating !== undefined} onsee={() => sawScores(t)} /></section>
+        {/if}
+
+        {#if ahead}{@render where()}{/if}
+
         <section class="section">
-          <h2>Thoughts</h2>
+          <h2>{ahead ? 'Notes' : 'Thoughts'}</h2>
           {#if reflectable}
             <p class="small muted" style="margin-bottom: 0.4rem">What was it about for you? Tap any that fit.</p>
             <Themes title={t} />
             <ul class="questions small muted">
-              {#each questionsFor(t.id) as q}<li>{q}</li>{/each}
+              {#each questionsFor(t.id, finished) as q}<li>{q}</li>{/each}
             </ul>
           {/if}
           <label class="sr-only" for="note">Your notes</label>
-          <textarea id="note" value={note ?? t.note ?? ''} oninput={(e) => { note = e.currentTarget.value; onNote(); }} onblur={saveNote} placeholder="A few words are enough: moments, arguments you had about it, what it made you think…"></textarea>
+          <textarea id="note" value={note ?? t.note ?? ''} oninput={(e) => { note = e.currentTarget.value; onNote(); }} onblur={saveNote} placeholder={ahead ? 'Who told you about it, why it caught your eye…' : 'A few words are enough: moments, arguments you had about it, what it made you think…'}></textarea>
+          <p class="small muted state" role="status">{noteState === 'saving' ? 'Saving…' : noteState === 'saved' ? 'Saved' : ''}</p>
           {#if reflectable}
             <div class="assist card">
               <div class="row" role="group" aria-label="Prompt">
@@ -297,7 +337,7 @@
           <section class="section">
             <div class="spread">
               <h2>Episodes</h2>
-              <label class="row follow"><input type="checkbox" checked={!!t.followed} onchange={(e) => update(t.id, { followed: e.currentTarget.checked })} /> On my calendar</label>
+              {#if t.status !== 'dropped'}<label class="row follow"><input type="checkbox" checked={onCalendar(t)} onchange={(e) => update(t.id, { followed: e.currentTarget.checked })} /> On my calendar</label>{/if}
             </div>
             {#if rel.kind !== 'unknown'}
               <p class="small muted">{rel.kind === 'stream' ? `Dates are ${rel.where}'s own release dates.` : `Dates are when it airs on ${rel.where} (shown in your time). Streaming sites may get it later.`}</p>
@@ -306,13 +346,11 @@
           </section>
         {/if}
 
-        <section class="section">
-          <Sources title={t} links={linksQ.value} heading={t.kind === 'show' ? 'Sources for the whole series' : 'Where to watch'} next={t.kind === 'show' ? next : undefined} />
-        </section>
+        {#if !ahead}{@render where()}{/if}
       </div>
 
       <aside class="side-col">
-        {#if t.overview}
+        {#if t.overview && !(ahead && premise(t.overview) === t.overview.replace(/\s+/g, ' ').trim())}
           <section class="section">
             <h2>About</h2>
             <p class="small">{t.overview}</p>
@@ -340,7 +378,7 @@
             <h2>History</h2>
             <ul class="history small">
               {#each watchesQ.value as w (w.id)}
-                <li class="spread"><span>{formatDay(w.date)} · {w.together ? 'together' : 'solo'}</span><button class="small ghost" onclick={() => deleteWatch(w.id)} aria-label="Delete this viewing">✕</button></li>
+                <li class="spread"><span>{formatDay(w.date)} · {w.together ? 'together' : 'solo'}</span><button class="small ghost" onclick={() => act('Viewing deleted', () => deleteWatch(w.id))} aria-label="Delete this viewing">✕</button></li>
               {/each}
             </ul>
           </section>
@@ -363,12 +401,20 @@
   </article>
 
   <LogWatch title={t} bind:open={logOpen} partner={partnerQ.value} />
+
+  {#snippet where()}
+    <section class="section" id="sources">
+      <Sources title={t!} links={linksQ.value} heading={t!.kind === 'show' ? 'Sources for the whole series' : 'Where to watch'} next={t!.kind === 'show' ? next : undefined} />
+    </section>
+  {/snippet}
 {/if}
 
 <style>
   .hero { display: flex; gap: 1.5rem; align-items: flex-start; }
   .head { flex: 1; min-width: 0; }
-  .critics .chip strong { font-variant-numeric: tabular-nums; }
+  .premise { margin-bottom: 0; }
+  .state { min-height: 1.3em; margin: 0.2rem 0 0; }
+  #sources { scroll-margin-top: 80px; }
   .next { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
   .next-ep { font-size: 1.1rem; }
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 2rem; }
@@ -379,17 +425,19 @@
   .people, .history { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
   .people a { color: var(--text); }
   .follow { color: var(--text); margin: 0; gap: 0.4rem; }
-  .follow input { accent-color: var(--accent); width: 18px; height: 18px; }
   .video { width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
   .video iframe { width: 100%; height: 100%; border: 0; }
   .links { gap: 1rem; }
   @media (max-width: 860px) {
     .cols { grid-template-columns: 1fr; gap: 0; }
   }
+  /* Phone: poster beside the title, everything else full width, so what to do next is on the first screen. */
   @media (max-width: 560px) {
-    .hero { flex-direction: column; align-items: center; text-align: center; }
-    .head { align-self: stretch; }
-    .hero :global(.row) { justify-content: center; }
-    .next { text-align: left; }
+    .hero { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 0.9rem; }
+    .hero :global(.poster) { width: 104px; }
+    .head { display: contents; }
+    .head > * { grid-column: 1 / -1; margin: 0; }
+    .head > :first-child { grid-column: 2; }
+    .head > :first-child p { margin-bottom: 0.4rem; }
   }
 </style>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { trailerInstinct, versusCritics, scoreCandidates, makerAffinity, contradictions, pearson } from '../../src/lib/taste';
-import { questionsFor, recapPrompt } from '../../src/lib/handoff';
+import { trailerInstinct, versusCritics, scoreCandidates, scoreBands, scoreText, compare, drawnOutcomes, makerAffinity, castAffinity, contradictions, pearson } from '../../src/lib/taste';
+import { questionsFor, recapPrompt, reflectPrompt } from '../../src/lib/handoff';
 import type { Title } from '../../src/lib/db';
 
 let n = 0;
@@ -21,18 +21,19 @@ describe('insights', () => {
     expect(r.surprises[0].title).toBe(ts[0]);
     expect(r.letdowns[0].title).toBe(ts[1]);
   });
-  it('compares only with critic scores, and never treats the Tomatometer as a score', () => {
+  it('compares with one kind of critics’ score at a time, by order only, never unit for unit', () => {
     const rt = (score: number) => [{ source: 'Rotten Tomatoes', value: `${score}%`, score }];
     const ts = [T({ rating: 9, critics: rt(50) }), T({ rating: 4, critics: rt(90) }), T({ rating: 7, critics: rt(80) }), T({ rating: 8, critics: [{ source: 'IMDb', value: '8/10', score: 80 }] })];
     const r = versusCritics(ts);
     expect(r).toMatchObject({ source: 'Rotten Tomatoes', n: 3 });
-    expect(Number.isNaN(r.meanGap)).toBe(true); // no "N points warmer" from a percentage of positive reviews
+    expect(r).not.toHaveProperty('meanGap'); // no "N points warmer" between two different scales
     expect(r.warmer.map((x) => x.title)).toEqual([ts[0]]);
     expect(r.colder.map((x) => x.title)).toEqual([ts[1]]);
+    // Rating everything two points under the critics but in the same order is agreement, not disagreement.
     const mc = (score: number) => [{ source: 'Metacritic', value: `${score}/100`, score }];
-    const m = versusCritics([T({ rating: 9, critics: mc(60) }), T({ rating: 5, critics: mc(40) })]);
-    expect(m.source).toBe('Metacritic');
-    expect(m.meanGap).toBeCloseTo(20); // (30 + 10) / 2
+    const same = versusCritics([60, 70, 80, 90].map((s, i) => T({ rating: 4 + i, critics: mc(s) })));
+    expect(same.r).toBeCloseTo(1);
+    expect([...same.warmer, ...same.colder]).toEqual([]);
   });
   it('ignores expectations recorded after watching', () => {
     const r = trailerInstinct([
@@ -54,6 +55,18 @@ describe('insights', () => {
     const ts = [T({ rating: 9, people: [v] }), T({ rating: 9, people: [v] }), T({ rating: 4 }), T({ rating: 5 })];
     expect(makerAffinity(ts)[0]).toMatchObject({ key: 'Villeneuve', n: 2, qid: 'Q1' });
   });
+  it('tells two people with one name apart, and gives a name without an id to the only one it can be', () => {
+    const steve = (qid?: string) => ({ name: 'Steve McQueen', role: 'director' as const, ...(qid ? { qid } : {}) });
+    const two = [T({ rating: 9, people: [steve('Q1')] }), T({ rating: 9, people: [steve('Q1')] }), T({ rating: 3, people: [steve('Q2')] }), T({ rating: 2, people: [steve('Q2')] })];
+    expect(makerAffinity(two).map((a) => [a.qid, a.avg])).toEqual([['Q1', 9], ['Q2', 2.5]]);
+    const cast = (qid?: string) => ({ name: 'A', role: 'cast' as const, ...(qid ? { qid } : {}) });
+    expect(castAffinity([T({ rating: 8, people: [cast('Q9')] }), T({ rating: 6, people: [cast()] })])[0]).toMatchObject({ n: 2, qid: 'Q9' });
+  });
+  it('shows the titles behind a pattern, best first', () => {
+    const v = { name: 'V', role: 'director' as const, qid: 'Q1' };
+    const ts = [T({ rating: 6, people: [v] }), T({ rating: 9, people: [v] })];
+    expect(makerAffinity(ts)[0].of).toEqual([ts[1], ts[0]]);
+  });
   it('flags genres you hoard but rate low', () => {
     const h = ['Horror'];
     const ts = [
@@ -65,7 +78,59 @@ describe('insights', () => {
   });
 });
 
+describe('scores and you', () => {
+  const rt = (score: number) => [{ source: 'Rotten Tomatoes', value: `${score}%`, score }];
+  it('keeps choices made without the scores apart from choices made with them, and from enjoyment', () => {
+    const b = scoreBands(
+      [
+        T({ status: 'want', critics: rt(40), chosenAt: '2026-01-02', scoresAt: undefined }),
+        T({ status: 'want', critics: rt(40), chosenAt: '2026-01-02', scoresAt: '2026-01-03' }), // opened only afterwards
+        T({ status: 'want', critics: rt(90), chosenAt: '2026-01-02', scoresAt: '2026-01-01' }),
+        T({ rating: 8, critics: rt(45) }),
+        T({ status: 'want', critics: rt(10) }), // not chosen in Discover: says nothing about instinct
+      ],
+      [
+        { qid: 'Q91', at: '2026-01-02', name: 'x', critics: rt(30), scoresAt: '2026-01-01' },
+        { qid: 'Q92', at: '2026-01-02', name: 'y', critics: rt(95) },
+        { qid: 'Q93', at: '2026-01-02' }, // from an earlier version: nothing known about it
+      ],
+    );
+    expect(b.map((x) => [x.ratings, x.blind, x.aware])).toEqual([
+      [[], { yes: 0, n: 1 }, { yes: 1, n: 1 }],
+      [[], { yes: 0, n: 0 }, { yes: 0, n: 0 }],
+      [[8], { yes: 2, n: 2 }, { yes: 0, n: 1 }],
+    ]);
+  });
+  it('says two groups differ only with enough titles and more than chance', () => {
+    expect(compare([9, 9, 9, 9], [1, 1, 1, 1])).toBe('few');
+    expect(compare([9, 9, 8, 9, 9], [4, 5, 4, 5, 4])).toBe('higher');
+    expect(compare([4, 5, 4, 5, 4], [9, 9, 8, 9, 9])).toBe('lower');
+    expect(compare([9, 3, 8, 5, 7], [8, 4, 9, 6, 5])).toBe('unclear');
+    expect(compare([7, 7, 7, 7, 7], [7, 7, 7, 7, 7])).toBe('unclear');
+  });
+  it('every kind of score says what it measures', () => {
+    expect(scoreText({ source: 'Rotten Tomatoes', value: '84%', score: 84 })).toMatch(/84% of critics positive/);
+    expect(scoreText({ source: 'TVmaze', value: '8.4/10', score: 84 })).toBe('8.4/10 from TVmaze users');
+  });
+  it('what drew you, against what you made of it', () => {
+    expect(drawnOutcomes([T({ drawn: ['the people'], rating: 9 }), T({ drawn: ['the people', 'the trailer'], status: 'want' })])).toEqual([
+      { why: 'the people', n: 2, ratings: [9] },
+      { why: 'the trailer', n: 1, ratings: [] },
+    ]);
+  });
+  it('knows which keenness came before the scores, which after, and which it cannot know', () => {
+    const t = (o: Partial<Title>) => T({ expectation: 4, rating: 7, expectedAt: '2026-01-05', ...o });
+    const r = trailerInstinct([t({}), t({ edited: { expectation: '2026-01-05' } }), t({ edited: { expectation: '2026-01-05' }, scoresAt: '2026-01-01' })]);
+    expect([r.n, r.blind, r.aware]).toEqual([3, 1, 1]);
+  });
+});
+
 describe('choosing', () => {
+  it('critics’ and audience scores play no part in what is suggested', () => {
+    const c = (score: number) => [{ source: 'Metacritic', value: `${score}/100`, score }, { source: 'TVmaze', value: `${score / 10}/10`, score }];
+    const order = (a: number, b: number) => scoreCandidates([T({ name: 'A', status: 'want', critics: c(a) }), T({ name: 'B', status: 'want', critics: c(b) })].map((title) => ({ title })), [], { kind: 'any' }).map((x) => [x.c.title.name, x.score]);
+    expect(order(10, 99)).toEqual(order(99, 10));
+  });
   it('respects filters and explains itself', () => {
     const keen = T({ status: 'want', expectation: 5, runtime: 95, genres: ['Drama'] });
     const long = T({ status: 'want', expectation: 5, runtime: 200, genres: ['Drama'] });
@@ -88,6 +153,22 @@ describe('handoff', () => {
     const p = recapPrompt(T({ name: 'Severance', kind: 'show' }), { id: 1, titleId: 't', season: 2, number: 3, name: 'Who Is Alive?', airdate: '', airtime: '' });
     expect(p).toContain('S02E03');
     expect(p).toMatch(/nothing about anything that happens after/);
+  });
+  it('never asks for spoilers past where you are in a series', () => {
+    const ep = { id: 1, titleId: 't', season: 2, number: 3, name: '', airdate: '2020-01-01', airtime: '' };
+    const show = T({ name: 'Severance', kind: 'show', status: 'watching', showStatus: 'Ended' });
+    const mid = { lastSeen: ep, next: { ...ep, number: 4 }, skipped: 1, unlisted: 0 };
+    for (const p of [reflectPrompt(show, [], mid), reviewPrompt(show, [], { length: 'short', spoilers: true }, mid), reviewPrompt(show, [], { length: 'short', spoilers: false }, mid)]) {
+      expect(p).toContain('only up to and including S02E03');
+      expect(p).not.toContain('Spoilers are fine');
+      expect(p).toContain('skipped 1 earlier episode');
+    }
+    expect(reflectPrompt(show, [], mid)).toContain('I am watching');
+    expect(reflectPrompt(show, [], { skipped: 0, unlisted: 0 })).toContain('Ask me how far I am');
+    expect(reflectPrompt(show, [], { lastSeen: ep, skipped: 0, unlisted: 0 })).toContain('Spoilers are fine'); // seen to the end
+    expect(reflectPrompt({ ...show, showStatus: 'Running' }, [], { lastSeen: ep, skipped: 0, unlisted: 0 })).toContain('only up to and including'); // caught up, not over
+    expect(reflectPrompt(T({ name: 'Heat' }))).toContain('Spoilers are fine');
+    for (let i = 0; i < 40; i++) expect(questionsFor(`tvm:${i}`, false).join()).not.toMatch(/ending/);
   });
 });
 
@@ -112,7 +193,7 @@ describe('review prompt', () => {
   });
 });
 
-import { reliable, interleave } from '../../src/lib/taste';
+import { reliable } from '../../src/lib/taste';
 describe('evidence', () => {
   it('calls a correlation reliable only when it beats chance for that many titles', () => {
     expect(reliable(0.5, 12)).toBe(false);
@@ -120,10 +201,5 @@ describe('evidence', () => {
     expect(reliable(0.4, 30)).toBe(true);
     expect(reliable(-0.7, 12)).toBe(true);
     expect(reliable(NaN, 40)).toBe(false);
-  });
-  it('takes discoveries from each trusted person in turn', () => {
-    const c = (via: string, n: number) => ({ via, n });
-    const items = [c('a', 1), c('a', 2), c('a', 3), c('b', 1), c('c', 1)];
-    expect(interleave(items, ['b', 'a', 'c']).map((x) => `${x.via}${x.n}`)).toEqual(['b1', 'a1', 'c1', 'a2', 'a3']);
   });
 });

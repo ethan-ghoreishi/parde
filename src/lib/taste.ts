@@ -1,4 +1,4 @@
-import type { Episode, Title } from './db';
+import type { CriticScore, Dismissed, Episode, Title } from './db';
 
 export const EXPECTATIONS = ['', 'Not for us', 'Unsure', 'Curious', 'Keen', 'Must see'] as const;
 
@@ -45,35 +45,18 @@ export function reliable(r: number, n: number): boolean {
   return Math.abs(r) * Math.sqrt((n - 2) / (1 - r * r)) >= 2;
 }
 
-/** One from each person in turn, most trusted first, so one prolific director cannot fill the list. */
-export function interleave<T extends { via: string }>(items: T[], order: string[]): T[] {
-  const queues = order.map((q) => items.filter((x) => x.via === q));
-  const out: T[] = [];
-  for (let i = 0; queues.some((q) => q.length > i); i++) for (const q of queues) if (q[i]) out.push(q[i]);
-  return out;
-}
-
-export interface Reference {
-  score: number;
-  source: string;
-  kind: 'critics' | 'audience';
-}
-
-/**
- * The outside view of a title. Metacritic first (a weighted average of review scores), then the
- * Tomatometer (the share of positive reviews, not a score), then audience ratings.
- */
-export function criticScore(t: Pick<Title, 'critics'>): Reference | undefined {
-  for (const source of ['Metacritic', 'Rotten Tomatoes']) {
-    const c = t.critics.find((x) => x.source === source);
-    if (c) return { score: c.score, source, kind: 'critics' };
+/** A score in words that say what it measures. They are never averaged together or compared with each other. */
+export function scoreText(c: CriticScore): string {
+  switch (c.source) {
+    case 'Rotten Tomatoes': return `${c.value} of critics positive (Rotten Tomatoes)`;
+    case 'Rotten Tomatoes average': return `critics' average ${c.value} (Rotten Tomatoes)`;
+    case 'Rotten Tomatoes audience': return `${c.value} of audience positive (Rotten Tomatoes)`;
+    case 'Metacritic': return `Metascore ${c.value} (Metacritic)`;
+    default: return `${c.value} from ${c.source} users`;
   }
-  const aud = t.critics.find((x) => x.source === 'IMDb') ?? t.critics.find((x) => x.source === 'TVmaze');
-  return aud && { score: aud.score, source: aud.source, kind: 'audience' };
 }
 
-export const referenceText = (r: Reference) =>
-  r.source === 'Rotten Tomatoes' ? `${r.score}% of critics positive` : r.source === 'Metacritic' ? `Metacritic ${r.score}` : `${r.source} users ${(r.score / 10).toFixed(1)}/10`;
+export const tomatometer = (critics: CriticScore[] | undefined) => critics?.find((c) => c.source === 'Rotten Tomatoes')?.score;
 
 export const rated = (titles: Title[]) => titles.filter((t) => t.rating !== undefined);
 
@@ -87,36 +70,49 @@ export interface Affinity {
   n: number;
   /** How far above your overall average, after allowing for how few titles there are */
   lift: number;
-  titles: string[];
+  /** The titles behind it, best rated first */
+  of: Title[];
   qid?: string;
 }
 
-function group(titles: Title[], keys: (t: Title) => { key: string; qid?: string }[], min: number): Affinity[] {
+function group(titles: Title[], keys: (t: Title) => { id?: string; key: string; qid?: string }[], min: number): Affinity[] {
   const r = rated(titles);
   const overall = mean(r.map((t) => t.rating!));
-  const m = new Map<string, { sum: number; n: number; titles: string[]; qid?: string }>();
+  const m = new Map<string, { key: string; qid?: string; of: Title[] }>();
   for (const t of r) {
-    for (const k of new Map(keys(t).map((k) => [k.key, k])).values()) {
-      const g = m.get(k.key) ?? { sum: 0, n: 0, titles: [], qid: k.qid };
-      g.sum += t.rating!;
-      g.n++;
-      g.titles.push(t.name);
-      g.qid ??= k.qid;
-      m.set(k.key, g);
+    for (const k of new Map(keys(t).map((k) => [k.id ?? k.key, k])).values()) {
+      const g = m.get(k.id ?? k.key) ?? { key: k.key, qid: k.qid, of: [] };
+      g.of.push(t);
+      m.set(k.id ?? k.key, g);
     }
   }
-  return [...m.entries()]
-    .filter(([, g]) => g.n >= min)
-    .map(([key, g]) => ({ key, avg: g.sum / g.n, n: g.n, lift: (g.sum + PRIOR * overall) / (g.n + PRIOR) - overall, titles: g.titles, qid: g.qid }))
+  return [...m.values()]
+    .filter((g) => g.of.length >= min)
+    .map((g) => {
+      const sum = g.of.reduce((a, t) => a + t.rating!, 0);
+      const n = g.of.length;
+      return { ...g, avg: sum / n, n, lift: (sum + PRIOR * overall) / (n + PRIOR) - overall, of: [...g.of].sort((a, b) => b.rating! - a.rating!) };
+    })
     .sort((a, b) => b.lift - a.lift || b.n - a.n);
 }
 
-export const makerAffinity = (titles: Title[], min = 2) =>
-  group(titles, (t) => t.people.filter((p) => p.role !== 'cast' && p.role !== 'composer').map((p) => ({ key: p.name, qid: p.qid })), min);
-export const castAffinity = (titles: Title[], min = 2) =>
-  group(titles, (t) => t.people.filter((p) => p.role === 'cast').map((p) => ({ key: p.name, qid: p.qid })), min);
-export const genreAffinity = (titles: Title[], min = 3) => group(titles, (t) => t.genres.map((g) => ({ key: g })), min);
-export const themeAffinity = (titles: Title[], min = 3) => group(titles, (t) => (t.themes ?? []).map((g) => ({ key: g })), min);
+/**
+ * People are told apart by Wikidata id: two directors can share a name. A name without an id (TVmaze) belongs
+ * to the one person known by it, if there is only one.
+ */
+function people(titles: Title[], want: (p: Title['people'][number]) => boolean) {
+  const ids = new Map<string, Set<string>>();
+  for (const t of titles) for (const p of t.people) if (p.qid) ids.set(p.name, (ids.get(p.name) ?? new Set()).add(p.qid));
+  const idOf = (p: Title['people'][number]) => p.qid ?? (ids.get(p.name)?.size === 1 ? [...ids.get(p.name)!][0] : undefined);
+  return (t: Title) => t.people.filter(want).map((p) => ({ id: idOf(p) ?? p.name, key: p.name, qid: idOf(p) }));
+}
+
+const isMaker = (p: Title['people'][number]) => p.role !== 'cast' && p.role !== 'composer';
+export const makerAffinity = (titles: Title[], min = 2) => group(titles, people(titles, isMaker), min);
+export const castAffinity = (titles: Title[], min = 2) => group(titles, people(titles, (p) => p.role === 'cast'), min);
+export const genreAffinity = (titles: Title[], min = 3) => group(titles, (t) => t.genres.map((key) => ({ key })), min);
+export const themeAffinity = (titles: Title[], min = 3) => group(titles, (t) => (t.themes ?? []).map((key) => ({ key })), min);
+export const countryAffinity = (titles: Title[], min = 3) => group(titles, (t) => t.countries.map((key) => ({ key })), min);
 
 // ---------- Choosing what to watch ----------
 
@@ -139,8 +135,9 @@ export interface PickFilter {
   genre?: string;
 }
 
+/** Ordered by what you have said and done: critics' and audience scores play no part. */
 export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFilter, today = new Date()): Choice[] {
-  const makers = new Map(makerAffinity(library, 2).map((a) => [a.key, a]));
+  const makers = makerAffinity(library, 2);
   const genres = new Map(genreAffinity(library, 2).map((a) => [a.key, a]));
   return cands
     .filter((c) => f.kind === 'any' || c.title.kind === f.kind)
@@ -153,26 +150,19 @@ export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFil
       let score = 0;
       if (t.expectation) {
         score += (t.expectation - 3) * 1.2;
-        if (t.expectation >= 4) reasons.push(`You were ${t.expectation === 5 ? 'desperate to see it' : 'keen'} after the trailer`);
+        if (t.expectation >= 4) reasons.push(t.expectation === 5 ? 'A “must see” after the trailer' : 'You were keen after the trailer');
       }
-      const cs = criticScore(t);
-      if (cs) {
-        score += (cs.score - 70) / 15;
-        if (cs.score >= 85) reasons.push(referenceText(cs));
+      const a = makers.find((m) => m.lift > 0.4 && t.people.some((p) => isMaker(p) && (m.qid && p.qid ? m.qid === p.qid : m.key === p.name)));
+      if (a) {
+        score += Math.min(a.lift, 2);
+        reasons.push(`${a.key}: you average ${a.avg.toFixed(1)} over ${a.n} of theirs`);
       }
-      for (const p of t.people) {
-        const a = makers.get(p.name);
-        if (a && a.lift > 0.4 && p.role !== 'cast') {
-          score += Math.min(a.lift, 2);
-          reasons.push(`${p.name}: you rated their other ${a.n} ${a.avg.toFixed(1)} on average`);
-          break;
-        }
-      }
+      if (t.drawn?.length) reasons.push(`What drew you: ${t.drawn.join(', ')}`);
       const g = t.genres.map((x) => genres.get(x)).filter((x): x is Affinity => !!x).sort((a, b) => b.lift - a.lift)[0];
       if (g) score += g.lift * 0.5;
-      if (c.episode) {
+      if (c.episode && t.status === 'watching') {
         score += 1;
-        reasons.push(t.status === 'watching' ? 'You are in the middle of it' : 'Ready to start');
+        reasons.push('You are in the middle of it');
       }
       const days = (today.getTime() - Date.parse(t.addedAt)) / 864e5;
       if (!c.episode && days > 120) {
@@ -188,55 +178,126 @@ export function scoreCandidates(cands: Candidate[], library: Title[], f: PickFil
 
 export interface Gap {
   title: Title;
-  /** your score minus the reference, on a 0–100 scale */
-  gap: number;
-  ref: number;
+  /** Text of the other side: the keenness, or the score as published */
+  ref: string;
 }
 
 /** An expectation recorded after the viewing is hindsight, not a prediction. */
 export const beforeWatching = (t: Title) => !(t.expectedAt && t.finishedAt && t.expectedAt.slice(0, 10) > t.finishedAt.slice(0, 10));
 
-/** Expectation 1–5 against enjoyment 1–10, both mapped to 0–100. */
+/**
+ * Whether you said how keen you were before Parde had shown you its scores: undefined when that was not yet
+ * recorded (edit times begin with the version that started keeping scores closed).
+ */
+export const blindExpectation = (t: Title) => (t.edited?.expectation && t.expectedAt ? !t.scoresAt || t.scoresAt > t.expectedAt : undefined);
+
+/** Expectation 1–5 against enjoyment 1–10, in plain counts against your own average. */
 export function trailerInstinct(titles: Title[]) {
   const pairs = titles.filter((t) => t.expectation && t.rating !== undefined && beforeWatching(t));
   const avg = mean(rated(titles).map((t) => t.rating!));
-  const gaps: Gap[] = pairs.map((t) => ({ title: t, ref: (t.expectation! - 1) * 25, gap: (t.rating! - 1) * (100 / 9) - (t.expectation! - 1) * 25 }));
+  const gap = (t: Title) => (t.rating! - 1) * (100 / 9) - (t.expectation! - 1) * 25;
+  const list = (ts: Title[]): Gap[] => ts.slice(0, 5).map((title) => ({ title, ref: EXPECTATIONS[title.expectation!] }));
   const keen = pairs.filter((t) => t.expectation! >= 4);
   const unsure = pairs.filter((t) => t.expectation! <= 2);
   return {
     n: pairs.length,
     r: spearman(pairs.map((t) => [t.expectation!, t.rating!])),
-    /** Plain counts read better than a coefficient while there are few titles */
     keen: { n: keen.length, above: keen.filter((t) => t.rating! > avg).length },
     unsure: { n: unsure.length, above: unsure.filter((t) => t.rating! > avg).length },
-    surprises: gaps.filter((g) => g.gap >= 25).sort((a, b) => b.gap - a.gap).slice(0, 5),
-    letdowns: gaps.filter((g) => g.gap <= -25).sort((a, b) => a.gap - b.gap).slice(0, 5),
+    blind: pairs.filter((t) => blindExpectation(t)).length,
+    aware: pairs.filter((t) => blindExpectation(t) === false).length,
+    surprises: list(pairs.filter((t) => gap(t) >= 25).sort((a, b) => gap(b) - gap(a))),
+    letdowns: list(pairs.filter((t) => gap(t) <= -25).sort((a, b) => gap(a) - gap(b))),
   };
 }
 
 /**
- * You against the critics, one source at a time. A level comparison ("warmer by N points") only for
- * Metacritic; with the Tomatometer only rank agreement and clear disagreements make sense.
+ * You against the critics, one source at a time, by order only: a 1–10 of yours and a critics' score are not the
+ * same unit, so what can be compared is whether you rank titles alike. Disagreements are titles at opposite
+ * ends of the two orders.
  */
 export function versusCritics(titles: Title[]) {
   const rows = (source: string) =>
     rated(titles).flatMap((t) => {
       const c = t.critics.find((x) => x.source === source);
-      return c ? [{ title: t, ref: c.score, gap: t.rating! * 10 - c.score }] : [];
+      return c ? [{ title: t, c }] : [];
     });
-  const mc = rows('Metacritic');
-  const rt = rows('Rotten Tomatoes');
-  const source = mc.length >= 5 || mc.length >= rt.length ? 'Metacritic' : 'Rotten Tomatoes';
-  const use = source === 'Metacritic' ? mc : rt;
-  const isMc = source === 'Metacritic';
+  const source = ['Metacritic', 'Rotten Tomatoes average', 'Rotten Tomatoes'].sort((a, b) => rows(b).length - rows(a).length)[0];
+  const use = rows(source);
+  const place = (xs: number[]) => (x: number) => (xs.filter((y) => y < x).length + xs.filter((y) => y === x).length / 2) / xs.length;
+  const mine = place(use.map((r) => r.title.rating!));
+  const theirs = place(use.map((r) => r.c.score));
+  const gap = (r: (typeof use)[number]) => mine(r.title.rating!) - theirs(r.c.score);
+  const list = (rs: typeof use): Gap[] => rs.slice(0, 5).map((r) => ({ title: r.title, ref: scoreText(r.c) }));
   return {
     source,
     n: use.length,
-    meanGap: isMc ? mean(use.map((r) => r.gap)) : NaN,
-    r: spearman(use.map((r) => [r.ref, r.title.rating!])),
-    warmer: use.filter((r) => (isMc ? r.gap >= 15 : r.title.rating! >= 8 && r.ref <= 60)).sort((a, b) => b.gap - a.gap).slice(0, 5),
-    colder: use.filter((r) => (isMc ? r.gap <= -15 : r.title.rating! <= 5 && r.ref >= 85)).sort((a, b) => a.gap - b.gap).slice(0, 5),
+    r: spearman(use.map((r) => [r.c.score, r.title.rating!])),
+    warmer: list(use.filter((r) => gap(r) >= 0.5).sort((a, b) => gap(b) - gap(a))),
+    colder: list(use.filter((r) => gap(r) <= -0.5).sort((a, b) => gap(a) - gap(b))),
   };
+}
+
+// ---------- Scores and you ----------
+
+export interface Tally {
+  yes: number;
+  n: number;
+}
+export interface Band {
+  label: string;
+  /** Titles with a Tomatometer in this band that you have rated */
+  ratings: number[];
+  /** Discover choices made before its scores were opened, and after */
+  blind: Tally;
+  aware: Tally;
+}
+
+/** Kept apart on purpose: what you choose without the scores, what you choose with them, and what you enjoy. */
+export function scoreBands(titles: Title[], dismissed: Dismissed[]): Band[] {
+  const bands: (Band & { min: number })[] = [
+    { label: '80% or more', min: 80, ratings: [], blind: { yes: 0, n: 0 }, aware: { yes: 0, n: 0 } },
+    { label: '60–79%', min: 60, ratings: [], blind: { yes: 0, n: 0 }, aware: { yes: 0, n: 0 } },
+    { label: 'under 60%', min: 0, ratings: [], blind: { yes: 0, n: 0 }, aware: { yes: 0, n: 0 } },
+  ];
+  const band = (score: number | undefined) => (score === undefined ? undefined : bands.find((b) => score >= b.min));
+  const choose = (score: number | undefined, yes: boolean, at: string, scoresAt?: string) => {
+    const t = band(score)?.[!scoresAt || scoresAt > at ? 'blind' : 'aware'];
+    if (t) (t.n++, (t.yes += yes ? 1 : 0));
+  };
+  for (const t of titles) {
+    if (t.rating !== undefined) band(tomatometer(t.critics))?.ratings.push(t.rating);
+    if (t.chosenAt) choose(tomatometer(t.critics), true, t.chosenAt, t.scoresAt);
+  }
+  // A title you passed over and then added anyway was wanted in the end: counted there, not twice.
+  const wanted = new Set(titles.map((t) => t.qid));
+  for (const d of dismissed) if (d.name && !wanted.has(d.qid)) choose(tomatometer(d.critics), false, d.at, d.scoresAt);
+  return bands.map(({ min: _, ...b }) => b);
+}
+
+/** Whether two groups of your ratings differ by more than chance. Under five in either, there is nothing to say. */
+export function compare(a: number[], b: number[]): 'few' | 'higher' | 'lower' | 'unclear' {
+  if (a.length < 5 || b.length < 5) return 'few';
+  const v = (xs: number[]) => xs.reduce((s, x) => s + (x - mean(xs)) ** 2, 0) / (xs.length - 1) / xs.length;
+  const d = mean(a) - mean(b);
+  const se = Math.sqrt(v(a) + v(b));
+  // Identical ratings on both sides have no spread to judge by; a real difference with none is as clear as it gets.
+  if (!se ? !d : Math.abs(d) / se < 2) return 'unclear';
+  return d > 0 ? 'higher' : 'lower';
+}
+
+/** For each reason something drew you: how often, and how you liked what you went on to rate. */
+export function drawnOutcomes(titles: Title[]) {
+  const m = new Map<string, { n: number; ratings: number[] }>();
+  for (const t of titles) {
+    for (const why of t.drawn ?? []) {
+      const g = m.get(why) ?? { n: 0, ratings: [] };
+      g.n++;
+      if (t.rating !== undefined) g.ratings.push(t.rating);
+      m.set(why, g);
+    }
+  }
+  return [...m].map(([why, g]) => ({ why, ...g })).sort((a, b) => b.n - a.n);
 }
 
 /** Genres you keep adding but don't enjoy as much as the rest. */

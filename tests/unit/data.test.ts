@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, type Episode, type Title } from '../../src/lib/db';
 import { buildBackup, parseBackup, restore, undoRestore, undoInfo } from '../../src/lib/backup';
+import { onCalendar } from '../../src/lib/schedule';
 import { logWatch, setSeen, seenUpTo, moveDomain, addLink, removeTitle, setStatus, setSeasonSeen, setProgress, reconcile, reconcileShows, refreshTitle, seenAllAired } from '../../src/lib/actions';
 
 const T = (id: string, o: Partial<Title> = {}): Title => ({
@@ -9,6 +10,14 @@ const T = (id: string, o: Partial<Title> = {}): Title => ({
   status: 'want', addedAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', ...o,
 });
 const E = (id: number, number: number, o: Partial<Episode> = {}): Episode => ({ id, titleId: 'tvm:1', season: 1, number, name: `E${number}`, airdate: '2020-01-01', airtime: '', ...o });
+
+/** A full backup file: every section present. */
+const file = (data: Record<string, unknown[]>) =>
+  JSON.stringify({ app: 'parde', schemaVersion: 1, exportedAt: '', data: { titles: [], episodes: [], seen: [], watches: [], links: [], settings: [], dismissed: [], ...data } });
+const problems = (data: Record<string, unknown[]>) => {
+  const p = parseBackup(file(data));
+  return p.ok ? p.problems : [p.error];
+};
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((t) => t.clear()));
@@ -37,29 +46,26 @@ describe('backup', () => {
     if (!r.ok) expect(r.error).toContain(msg);
   });
 
-  it('rejects duplicates, bad ratings and unsafe links before writing anything', () => {
-    const base = { app: 'parde', schemaVersion: 1, exportedAt: '', data: {} as Record<string, unknown[]> };
-    const dup = { ...base, data: { titles: [T('wd:Q1'), T('wd:Q1')] } };
-    expect(parseBackup(JSON.stringify(dup)).ok).toBe(false);
-    const rating = { ...base, data: { titles: [T('wd:Q1', { rating: 11 })] } };
-    expect(parseBackup(JSON.stringify(rating)).ok).toBe(false);
-    const js = { ...base, data: { links: [{ id: 'l', titleId: 'wd:Q1', url: 'javascript:alert(1)', addedAt: 'x' }] } };
-    const r = parseBackup(JSON.stringify(js));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toMatch(/unsafe/);
+  it('finds duplicates, bad ratings and unsafe links, and never lets such a file replace anything', async () => {
+    const link = (o: object) => ({ id: 'l', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01', ...o });
+    expect(problems({ titles: [T('wd:Q1'), T('wd:Q1')] })).toEqual([expect.stringMatching(/listed twice/)]);
+    expect(problems({ titles: [T('wd:Q1', { rating: 11 })] })).toEqual([expect.stringMatching(/rating/)]);
+    expect(problems({ titles: [T('wd:Q1')], links: [link({ url: 'javascript:alert(1)' })] })).toEqual([expect.stringMatching(/unsafe/)]);
+    await db.titles.add(T('wd:Q9'));
+    const p = parseBackup(file({ titles: [T('wd:Q1')], links: [link({ url: 'javascript:alert(1)' })] }));
+    if (!p.ok) throw new Error(p.error);
+    expect(p.backup.data.links).toEqual([]);
+    await expect(restore(p.backup, 'replace')).rejects.toThrow(/cannot replace/);
+    expect((await db.titles.toCollection().primaryKeys())).toEqual(['wd:Q9']);
   });
 
   it('merge keeps local data and lets the newer title edit win', async () => {
     await db.titles.bulkAdd([T('wd:Q1', { rating: 5, updatedAt: '2026-03-01' }), T('wd:Q2', { rating: 7, updatedAt: '2026-01-01' })]);
-    await db.links.add({ id: 'local', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: 'x', broken: true });
-    const file = {
-      app: 'parde', schemaVersion: 1, exportedAt: '',
-      data: {
-        titles: [T('wd:Q1', { rating: 9, updatedAt: '2026-02-01' }), T('wd:Q2', { rating: 3, updatedAt: '2026-02-01' }), T('wd:Q3')],
-        links: [{ id: 'local', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: 'x' }],
-      },
-    };
-    const p = parseBackup(JSON.stringify(file));
+    await db.links.add({ id: 'local', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01', broken: true });
+    const p = parseBackup(file({
+      titles: [T('wd:Q1', { rating: 9, updatedAt: '2026-02-01' }), T('wd:Q2', { rating: 3, updatedAt: '2026-02-01' }), T('wd:Q3')],
+      links: [{ id: 'local', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01' }],
+    }));
     if (!p.ok) throw new Error(p.error);
     await restore(p.backup, 'merge');
     expect((await db.titles.get('wd:Q1'))?.rating).toBe(5); // local newer
@@ -70,12 +76,12 @@ describe('backup', () => {
 });
 
 describe('backup integrity', () => {
-  const file = (data: Record<string, unknown[]>) => JSON.stringify({ app: 'parde', schemaVersion: 1, exportedAt: '', data });
-  it('rejects records that point at a title missing from the file, and malformed themes', () => {
-    const orphan = parseBackup(file({ titles: [T('wd:Q1')], seen: [{ episodeId: 1, titleId: 'tvm:9', seenAt: 'x' }] }));
-    expect(orphan.ok).toBe(false);
-    expect(parseBackup(file({ titles: [T('wd:Q1', { themes: ['memory', 3 as unknown as string] })] })).ok).toBe(false);
-    expect(parseBackup(file({ titles: [T('wd:Q1', { themes: ['memory'] })] })).ok).toBe(true);
+  it('keeps records whose title is not in the file, and finds malformed themes', () => {
+    const stray = parseBackup(file({ titles: [T('wd:Q1')], seen: [{ episodeId: 1, titleId: 'tvm:9', seenAt: '2026-01-01' }] }));
+    expect(stray.ok && stray.problems).toEqual([]);
+    expect(stray.ok && stray.counts.seen).toBe(1);
+    expect(problems({ titles: [T('wd:Q1', { themes: ['memory', 3 as unknown as string] })] })).toHaveLength(1);
+    expect(problems({ titles: [T('wd:Q1', { themes: ['memory'] })] })).toEqual([]);
   });
   it('a replace can be undone, and the undo copy never ends up inside backups', async () => {
     await db.titles.add(T('wd:Q1', { rating: 8 }));
@@ -116,13 +122,14 @@ describe('backup integrity', () => {
     ]);
     await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7', airstamp: '2020-01-01T21:00:00Z', airtime: '21:00', runtime: 50, summary: 's' }), E(71, 2, { titleId: 'tvm:7' })]);
     await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
-    await db.seen.put({ episodeId: 999, titleId: 'tvm:7', seenAt: 'x' }); // an episode that no longer exists
+    await db.seen.put({ episodeId: 999, titleId: 'tvm:7', seenAt: '2026-01-01' }); // an episode that no longer exists
     await addLink('tvm:7', 'https://a.org/s{ss}e{ee}');
     await addLink('tvm:7', 'https://a.org/x', { season: 1, episode: 2 }, 'HD');
     await db.watches.add({ id: 'w', titleId: 'wd:Q1', date: '2026-02-01', together: true });
     await db.settings.bulkPut([{ key: 'sites', value: [{ name: 'JW', url: 'https://jw.com/?q={q}' }] }, { key: 'partner', value: 'Sam' }]);
     const p = parseBackup(JSON.stringify(await buildBackup()));
     expect(p.ok && p.counts).toMatchObject({ titles: 2, episodes: 2, seen: 2, links: 2, watches: 1, settings: 2 });
+    expect(p.ok && p.problems).toEqual([]);
   });
   it('drops a malformed fetched detail but rejects malformed records of yours', () => {
     const p = parseBackup(file({ titles: [T('wd:Q1', { trailer: 'x?autoplay=1&list=evil', people: [{ name: 'A', role: 'director' }, { name: 3 } as never] })] }));
@@ -134,10 +141,10 @@ describe('backup integrity', () => {
     for (const bad of [
       { titles: [T('wd:Q1', { note: 5 as never })] },
       { titles: [T('wd:Q1', { kind: 'show' })] },
-      { titles: [T('wd:Q1')], seen: [{ episodeId: 1, titleId: 'wd:Q1', seenAt: 'x' }] },
+      { titles: [T('wd:Q1')], seen: [{ episodeId: 1, titleId: 'wd:Q1', seenAt: '2026-01-01' }] },
       { settings: [{ key: 'sites', value: 'oops' }] },
-      { titles: [T('wd:Q1')], links: [{ id: 'l', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: 'x', episode: 2 }] },
-    ]) expect(parseBackup(file(bad)).ok, JSON.stringify(bad)).toBe(false);
+      { titles: [T('wd:Q1')], links: [{ id: 'l', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01', episode: 2 }] },
+    ]) expect(problems(bad), JSON.stringify(bad)).toHaveLength(1);
   });
   it('merging an older backup never brings back episodes TVmaze replaced; its marks move to the current ones', async () => {
     await db.titles.add(T('tvm:7', { kind: 'show', status: 'watching', showStatus: 'Running', updatedAt: '2026-05-01' }));
@@ -237,7 +244,7 @@ describe('skipped episodes', () => {
     await setSeen(E(4, 4), true);
     const t = await db.titles.get('tvm:1');
     expect(t?.status).toBe('watched');
-    expect(t?.followed).toBe(false);
+    expect(t?.followed).toBe(true); // nothing left to show, but if it ever comes back you will know
   });
 });
 
@@ -305,7 +312,7 @@ describe('episodes', () => {
     await seenUpTo(E(3, 3));
     const t = await db.titles.get('tvm:1');
     expect(t?.status).toBe('watched');
-    expect(t?.followed).toBe(false);
+    expect(t?.followed).toBe(true);
     expect(await db.seen.count()).toBe(3);
   });
   it('removing a title removes all its records', async () => {
@@ -318,7 +325,7 @@ describe('episodes', () => {
   });
   it('dropping a show takes it off the calendar', async () => {
     await setStatus((await db.titles.get('tvm:1'))!, 'dropped');
-    expect((await db.titles.get('tvm:1'))?.followed).toBe(false);
+    expect(onCalendar((await db.titles.get('tvm:1'))!)).toBe(false);
   });
 });
 

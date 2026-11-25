@@ -1,24 +1,17 @@
 <script lang="ts">
-  import { db, now, getSetting, type Title } from '../lib/db';
+  import { db, getSetting, type Dismissed, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { titleHref, personHref } from '../lib/router.svelte';
   import {
-    EXPECTATIONS, trailerInstinct, versusCritics, makerAffinity, castAffinity, genreAffinity, themeAffinity, contradictions,
-    partnerSplits, counts, decade, rated, mean, reliable, interleave, type Affinity, type Gap,
+    trailerInstinct, versusCritics, makerAffinity, castAffinity, genreAffinity, themeAffinity, contradictions, scoreBands, compare, drawnOutcomes,
+    partnerSplits, counts, decade, rated, mean, reliable, type Affinity, type Gap, type Tally,
   } from '../lib/taste';
-  import { credits, posters, type Credit } from '../lib/api/wiki';
-  import { addFilm } from '../lib/actions';
-  import { toast, errorText } from '../lib/ui.svelte';
   import { formatDay } from '../lib/format';
-  import Poster from '../components/Poster.svelte';
+  import DiscoverTabs from '../components/DiscoverTabs.svelte';
 
   const data = live(
-    () => async () => ({
-      titles: await db.titles.toArray(),
-      dismissed: new Set(await db.dismissed.toCollection().primaryKeys()),
-      partner: await getSetting('partner', ''),
-    }),
-    { titles: [] as Title[], dismissed: new Set<string>(), partner: '' },
+    () => async () => ({ titles: await db.titles.toArray(), dismissed: await db.dismissed.toArray(), partner: await getSetting('partner', '') }),
+    { titles: [] as Title[], dismissed: [] as Dismissed[], partner: '' },
   );
 
   const titles = $derived(data.value.titles);
@@ -27,6 +20,8 @@
   const avg = $derived(mean(r.map((t) => t.rating!)));
   const instinct = $derived(trailerInstinct(titles));
   const critics = $derived(versusCritics(titles));
+  const bands = $derived(scoreBands(titles, data.value.dismissed));
+  const drawn = $derived(drawnOutcomes(titles).filter((d) => d.n >= 2));
   const makers = $derived(makerAffinity(titles));
   const actors = $derived(castAffinity(titles, 3).filter((a) => a.lift > 0.4).slice(0, 6));
   const genresA = $derived(genreAffinity(titles));
@@ -49,112 +44,131 @@
   // A coefficient is described only when it is more than chance for this many titles.
   const describeR = (x: number, n: number) =>
     !reliable(x, n) ? 'shows no reliable link yet with' : x >= 0.5 ? 'clearly tracks' : x > 0 ? 'loosely tracks' : 'runs against';
-  const affLine = (a: Affinity) => `${a.avg.toFixed(1)} avg · ${a.n} title${a.n > 1 ? 's' : ''}${a.n < 4 ? ', an early sign' : ''}`;
   const ratedN = $derived(r.length);
   const withMakers = $derived(r.filter((t) => t.people.some((p) => p.role !== 'cast' && p.role !== 'composer')).length);
-  const likedNames = $derived(new Set(liked.map((m) => m.key)));
+  const likedIds = $derived(new Set(liked.map((m) => m.qid ?? m.key)));
   // Already on your list, by people you rate highly: the most actionable thing here.
-  const queued = $derived(titles.filter((t) => t.status === 'want' && t.people.some((p) => p.role !== 'cast' && likedNames.has(p.name))).slice(0, 5));
+  const queued = $derived(titles.filter((t) => t.status === 'want' && t.people.some((p) => p.role !== 'cast' && likedIds.has(p.qid ?? p.name))).slice(0, 5));
+
+  // ----- Scores and you -----
+  const sourceName: Record<string, string> = { Metacritic: 'Metacritic', 'Rotten Tomatoes': 'the Tomatometer', 'Rotten Tomatoes average': 'the critics’ average on Rotten Tomatoes' };
+  const chosen = $derived(bands.reduce((n, b) => n + b.blind.n + b.aware.n, 0));
+  // The top band against the lowest one with enough in it to compare.
+  const other = $derived(bands[2].ratings.length >= 5 ? bands[2] : bands[1]);
+  const enjoy = $derived(compare(bands[0].ratings, other.ratings));
+  const low = $derived(bands[2].ratings.length);
+  const of = (t: Tally) => (t.n ? `${t.yes} of ${t.n}` : '–');
+  const inBand = $derived(bands.reduce((n, b) => n + b.ratings.length, 0));
+  const showBands = $derived(inBand >= 5 || chosen >= 4);
 
   // What would unlock more, said once rather than as a wall of locked cards.
   const pending = $derived(
     [
-      instinct.n < 4 && `trailer instinct after ${4 - instinct.n} more title${4 - instinct.n > 1 ? 's' : ''} with a before-watching “how keen” and a rating`,
-      critics.n < 5 && `you vs critics after ${5 - critics.n} more rated film${5 - critics.n > 1 ? 's' : ''} with a Metacritic or Rotten Tomatoes score`,
-      !makers.length && 'people you trust once you rate two titles by the same director or writer',
-      !themesA.length && 'recurring themes once three rated titles share a theme',
+      instinct.n < 4 && `trailer instinct, after ${4 - instinct.n} more title${4 - instinct.n > 1 ? 's' : ''} with a “how keen” from before watching and a rating`,
+      !showBands && 'how scores sway you, as you rate films and choose in Discover',
+      !makers.length && 'people you trust, once you rate two titles by the same director or writer',
+      !themesA.length && 'recurring themes, once three rated titles share one',
     ].filter((x): x is string => !!x),
   );
-
-  // ----- Discovery: more from people you trust -----
-  let suggestions = $state<Credit[]>([]);
-  let pics = $state<Record<string, string>>({});
-  let finding = $state(false);
-  let found = $state(false);
-  const people = $derived.by(() => {
-    const trusted = makers.filter((m) => m.qid && m.lift > 0.3).slice(0, 10).map((m) => ({ qid: m.qid!, name: m.key }));
-    if (trusted.length) return trusted;
-    // Too few ratings for averages: start from the makers of anything you rated 9 or 10.
-    const fav = r.filter((t) => t.rating! >= 9).flatMap((t) => t.people.filter((p) => p.qid && p.role !== 'cast' && p.role !== 'composer'));
-    return [...new Map(fav.map((p) => [p.qid!, { qid: p.qid!, name: p.name }])).values()].slice(0, 10);
-  });
-  const nameOf = $derived(new Map(people.map((p) => [p.qid, p.name])));
-  const owned = $derived(new Set(titles.map((t) => t.qid).filter(Boolean)));
-  const thisYearN = new Date().getFullYear();
-  const visible = $derived(
-    interleave(
-      suggestions.filter((s) => s.kind === 'film' && s.year && s.year <= thisYearN && !owned.has(s.qid) && !data.value.dismissed.has(s.qid)),
-      people.map((p) => p.qid),
-    ).slice(0, 18),
-  );
-  const why = (qid: string) => {
-    const m = makers.find((x) => x.qid === qid);
-    return m ? `you rate their work ${m.avg.toFixed(1)} across ${m.n}` : 'you rated one of theirs 9 or more';
-  };
-
-  async function discover() {
-    finding = true;
-    try {
-      suggestions = (await credits(people.map((p) => p.qid), ['directed', 'wrote', 'created'])).sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
-      found = true;
-      pics = await posters(visible.map((s) => s.wiki).filter((x): x is string => !!x)).catch(() => ({}));
-    } catch (e) {
-      toast(errorText(e), 'error');
-    } finally {
-      finding = false;
-    }
-  }
-
-  async function want(s: Credit) {
-    try {
-      await addFilm(s.qid);
-      toast(`${s.name} added to your list`);
-    } catch (e) {
-      toast(errorText(e), 'error');
-    }
-  }
-  const dismiss = (s: Credit) => db.dismissed.put({ qid: s.qid, at: now() });
 </script>
 
-{#snippet gapList(items: Gap[], kind: 'trailer' | 'critics')}
+{#snippet gapList(items: Gap[])}
   <ul class="gaps small">
-    {#each items as g}
-      <li>
-        <a href={titleHref(g.title.id)}>{g.title.name}</a>
-        <span class="muted">
-          {kind === 'trailer' ? `${EXPECTATIONS[g.title.expectation!]} → ${g.title.rating}/10` : critics.source === 'Metacritic' ? `Metacritic ${g.ref} · you ${g.title.rating}/10` : `${g.ref}% of critics positive · you ${g.title.rating}/10`}
-        </span>
-      </li>
+    {#each items as g (g.title.id)}
+      <li><a href={titleHref(g.title.id)}>{g.title.name}</a> <span class="muted">{g.ref} · you {g.title.rating}/10</span></li>
     {/each}
   </ul>
 {/snippet}
 
+<!-- Every pattern opens to the titles and ratings it rests on. -->
 {#snippet affList(items: Affinity[], people: boolean)}
   <ul class="aff small">
-    {#each items as a}
+    {#each items as a (a.qid ?? a.key)}
       <li>
-        {#if people}<a href={personHref(a.qid, a.key)}>{a.key}</a>{:else}{a.key}{/if}
-        <span class="muted">{affLine(a)}</span>
+        <details>
+          <summary><strong>{a.key}</strong> <span class="muted">{a.avg.toFixed(1)} over {a.n}{a.n < 4 ? ', an early sign' : ''}</span></summary>
+          <p>{#each a.of.slice(0, 8) as t, i (t.id)}<a href={titleHref(t.id)}>{t.name}</a> {t.rating}{i < Math.min(a.of.length, 8) - 1 ? ', ' : ''}{/each}{a.of.length > 8 ? '…' : ''}</p>
+          {#if people}
+            <p class="row">{#if a.qid}<a class="chip" href="#/discover?{new URLSearchParams({ from: `person:${a.qid}`, name: a.key })}">Explore their work</a>{/if}<a class="chip" href={personHref(a.qid, a.key)}>Filmography</a></p>
+          {/if}
+        </details>
       </li>
     {/each}
   </ul>
 {/snippet}
 
+<DiscoverTabs current="taste" />
 <h1>Your taste</h1>
 
 {#if data.ready && !titles.length}
-  <div class="empty">Insights grow from what you add, rate and note. Start with a few films you know well, or import your ratings in Settings.</div>
+  <div class="empty">
+    <p>What you rate and choose in Discover shows up here as patterns, each with the titles behind it.</p>
+    <a class="btn primary" href="#/discover">Start with what you have seen</a>
+  </div>
 {:else}
   <div class="stats">
-    <div class="card"><strong>{watched.filter((t) => t.kind === 'film').length}</strong><span class="small muted">films watched</span></div>
+    <div class="card"><strong>{watched.filter((t) => t.kind === 'film').length}</strong><span class="small muted">films seen</span></div>
     <div class="card"><strong>{watched.filter((t) => t.kind === 'show').length}</strong><span class="small muted">series finished</span></div>
-    <div class="card"><strong>{thisYear}</strong><span class="small muted">finished this year</span></div>
+    <div class="card"><strong>{thisYear}</strong><span class="small muted">with a date this year</span></div>
     <div class="card"><strong>{Number.isNaN(avg) ? '–' : avg.toFixed(1)}</strong><span class="small muted">average of {r.length} rating{r.length === 1 ? '' : 's'}</span></div>
   </div>
 
-  <p class="small muted lead">Every pattern below shows how many titles it rests on. A few titles make an early sign, not a conclusion; averages from small groups are pulled toward your overall average so one great film cannot dominate.</p>
+  <p class="small muted lead">Open any pattern to see the titles behind it. A few titles are an early sign, not a conclusion, and you mostly rate what you chose to watch, so things you avoid are barely represented.</p>
 
   <div class="cards">
+    {#if liked.length || notYours.length}
+      <section class="card">
+        <h2>Directors and writers</h2>
+        {#if liked.length}<h3>Above your average</h3>{@render affList(liked, true)}{/if}
+        {#if queued.length}
+          <p class="small note">Already on your list by them: {#each queued as t, i}<a href={titleHref(t.id)}>{t.name}</a>{i < queued.length - 1 ? ', ' : ''}{/each}.</p>
+        {/if}
+        {#if notYours.length}<h3>Not really your people</h3>{@render affList(notYours, true)}{/if}
+        {#if withMakers < ratedN}<p class="small muted">From {withMakers} of your {ratedN} rated titles; the rest have no director or writer listed.</p>{/if}
+      </section>
+    {/if}
+
+    {#if showBands}
+      <section class="card">
+        <h2>Scores and you</h2>
+        <div class="scroll">
+          <table class="small">
+            <caption class="sr-only">By Tomatometer: how you rated, and how often you said yes in Discover before and after opening the scores</caption>
+            <thead><tr><th scope="col">Critics positive</th><th scope="col">You rated</th><th scope="col">Said yes unseen</th><th scope="col">Said yes knowing</th></tr></thead>
+            <tbody>
+              {#each bands as b (b.label)}
+                <tr><th scope="row">{b.label}</th><td>{b.ratings.length ? `${mean(b.ratings).toFixed(1)} (${b.ratings.length})` : '–'}</td><td>{of(b.blind)}</td><td>{of(b.aware)}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="small">
+          {#if enjoy === 'few'}Too few rated so far to compare.
+          {:else if enjoy === 'unclear'}No reliable difference yet between how you rate 80% or more and {other.label}.
+          {:else}Among what you chose to watch, you rate 80% or more {enjoy === 'higher' ? 'higher' : 'lower'} than {other.label}, by more than chance.{/if}
+          {#if low < 5}You have rated {low || 'none'} under 60%: too few to say whether a low score would steer you right.{/if}
+        </p>
+        {#if critics.n >= 5}
+          <p class="small">Your order {describeR(critics.r, critics.n)} {sourceName[critics.source]} ({critics.n} of your {ratedN} rated titles have it).</p>
+        {/if}
+        {#if critics.n >= 8 && critics.warmer.length}<h3>You place higher than critics do</h3>{@render gapList(critics.warmer)}{/if}
+        {#if critics.n >= 8 && critics.colder.length}<h3>Critics place higher than you do</h3>{@render gapList(critics.colder)}{/if}
+        <p class="small muted">“Unseen” means before you opened the scores in Discover. Audience scores have no open source for most titles, so ideas about critics and audiences disagreeing can only be tested by what drew you.</p>
+      </section>
+    {/if}
+
+    {#if drawn.length}
+      <section class="card">
+        <h2>What draws you in</h2>
+        <ul class="gaps small">
+          {#each drawn as d (d.why)}
+            <li><strong>{d.why}</strong> <span class="muted">{d.n} chosen{d.ratings.length ? `, ${d.ratings.length} watched: ${mean(d.ratings).toFixed(1)} on average` : ', none rated yet'}{d.ratings.length && d.ratings.length < 4 ? ', an early sign' : ''}</span></li>
+          {/each}
+        </ul>
+        <p class="small muted">Against {Number.isNaN(avg) ? 'your average' : `${avg.toFixed(1)} overall`}. From the reasons you tapped before watching.</p>
+      </section>
+    {/if}
+
     {#if instinct.n >= 4}
       <section class="card">
         <h2>Trailer instinct</h2>
@@ -167,34 +181,9 @@
         {:else}
           <p class="small muted">{instinct.n} titles so far: {strength(instinct.n)}. A firmer read comes at 12.</p>
         {/if}
-        {#if instinct.surprises.length}<h3>Better than the trailer</h3>{@render gapList(instinct.surprises, 'trailer')}{/if}
-        {#if instinct.letdowns.length}<h3>The trailer oversold it</h3>{@render gapList(instinct.letdowns, 'trailer')}{/if}
-      </section>
-    {/if}
-
-    {#if critics.n >= 5}
-      <section class="card">
-        <h2>You and the critics</h2>
-        {#if critics.source === 'Metacritic'}
-          <p>Against Metacritic you rate {Math.abs(critics.meanGap) < 3 ? 'about the same' : `${Math.round(Math.abs(critics.meanGap))} points ${critics.meanGap > 0 ? 'warmer' : 'colder'}`} on average, and their scores {describeR(critics.r, critics.n)} yours ({critics.n} of your {ratedN} rated titles have a Metacritic score).</p>
-        {:else}
-          <p>How many critics liked something {describeR(critics.r, critics.n)} how much you do ({critics.n} of your {ratedN} rated titles have a Rotten Tomatoes score). The Tomatometer counts positive reviews, so it is not compared point for point.</p>
-        {/if}
-        {#if critics.warmer.length}<h3>You liked, critics less so</h3>{@render gapList(critics.warmer, 'critics')}{/if}
-        {#if critics.colder.length}<h3>Critics liked, you less so</h3>{@render gapList(critics.colder, 'critics')}{/if}
-        <p class="small muted">Scores via Wikidata; they can lag the live sites.</p>
-      </section>
-    {/if}
-
-    {#if liked.length || notYours.length}
-      <section class="card">
-        <h2>Directors and writers</h2>
-        {#if liked.length}<h3>Above your average</h3>{@render affList(liked, true)}{/if}
-        {#if queued.length}
-          <p class="small note">Already on your list by them: {#each queued as t, i}<a href={titleHref(t.id)}>{t.name}</a>{i < queued.length - 1 ? ', ' : ''}{/each}.</p>
-        {/if}
-        {#if notYours.length}<h3>Not really your people</h3>{@render affList(notYours, true)}{/if}
-        {#if withMakers < ratedN}<p class="small muted">From {withMakers} of your {ratedN} rated titles; the rest have no director or writer listed.</p>{/if}
+        <p class="small muted">{instinct.blind} said before opening the scores, {instinct.aware} after{instinct.n - instinct.blind - instinct.aware ? `, ${instinct.n - instinct.blind - instinct.aware} from before Parde kept track` : ''}.</p>
+        {#if instinct.surprises.length}<h3>Better than the trailer</h3>{@render gapList(instinct.surprises)}{/if}
+        {#if instinct.letdowns.length}<h3>The trailer oversold it</h3>{@render gapList(instinct.letdowns)}{/if}
       </section>
     {/if}
 
@@ -209,7 +198,7 @@
           {/each}
         </div>
         {#each themesA.filter((a) => Math.abs(a.lift) >= 0.4).slice(0, 3) as a}
-          <p class="small note">Titles about <strong>{a.key}</strong> {a.lift > 0 ? 'move you more than most' : 'land less well with you'}: {a.avg.toFixed(1)} across {a.n} ({strength(a.n)}).</p>
+          <p class="small note">Titles about <strong>{a.key}</strong> {a.lift > 0 ? 'move you more than most' : 'land less well with you'}: {a.avg.toFixed(1)} over {a.n} ({strength(a.n)}). <a href="#/discover?{new URLSearchParams({ from: `about:${a.key}` })}">Find others</a></p>
         {/each}
       </section>
     {/if}
@@ -242,43 +231,11 @@
         </ul>
       </section>
     {/if}
-
   </div>
 
   {#if pending.length}
     <p class="small muted pending">Still learning: {pending.join('; ')}.</p>
   {/if}
-
-  <section class="section">
-    <div class="spread">
-      <h2>More from people you trust</h2>
-      {#if people.length}<button class="small" onclick={discover} disabled={finding}>{finding ? 'Looking…' : found ? 'Look again' : 'Find films'}</button>{/if}
-    </div>
-    {#if !people.length}
-      <p class="muted small">Rate two titles by the same director or writer (or anything 9 or 10) and Parde will find their other work. You can also search any person from Add.</p>
-    {:else if !found}
-      <p class="muted small">Other films by {people.slice(0, 4).map((p) => p.name).join(', ')}{people.length > 4 ? ' and others' : ''}. Looked up on Wikidata when you ask.</p>
-    {:else if !visible.length}
-      <p class="muted small">You already have everything we found.</p>
-    {:else}
-      <ul class="grid sugg">
-        {#each visible as s (s.qid)}
-          <li class="stack">
-            <Poster src={s.wiki ? pics[s.wiki] : undefined} name={s.name} />
-            <div>
-              <div class="name">{s.name}</div>
-              <div class="small muted">{s.year ?? ''} · <a href={personHref(s.via, nameOf.get(s.via) ?? '')}>{nameOf.get(s.via)}</a> {s.roles[0]}</div>
-              <div class="small muted">{why(s.via)}</div>
-            </div>
-            <div class="row">
-              <button class="small primary" onclick={() => want(s)}>Want</button>
-              <button class="small ghost" onclick={() => dismiss(s)} aria-label="Not interested in {s.name}">Not for us</button>
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
 
   {#if diary.length}
     <section class="section">
@@ -295,10 +252,10 @@
 {#if decades.length >= 2}
   <section class="section card">
     <h2>Across time and place</h2>
-    <div class="bars" role="list" aria-label="Watched titles by decade">
+    <div class="bars" role="list" aria-label="Seen titles by decade">
       {#each decades as [d, n]}
         {@const max = Math.max(...decades.map((x) => x[1]))}
-        <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
+        <div class="bar" role="listitem" aria-label="{d}: {n}"><span class="small">{n}</span><span class="fill" style="height: {(n / max) * 100}%"></span><span class="small muted">{d.slice(2)}</span></div>
       {/each}
     </div>
     {#if countries.length}<p class="small" style="margin-top: 0.75rem"><span class="muted">From</span> {countries.map(([c, n]) => `${c} (${n})`).join(', ')}</p>{/if}
@@ -311,20 +268,28 @@
   .stats strong { font-family: var(--serif); font-size: 1.8rem; font-variant-numeric: tabular-nums; }
   @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
   .lead { max-width: 60ch; margin-bottom: 1.25rem; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; align-items: start; }
   @media (max-width: 400px) { .cards { grid-template-columns: 1fr; } }
   .cards h3 { font-family: var(--sans); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 0.9rem; }
   .gaps, .aff { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.3rem; }
   .gaps a, .aff a { color: var(--text); }
   .note { margin-top: 0.75rem; padding: 0.6rem 0.75rem; background: var(--surface-2); border-radius: 8px; }
   .pending { margin-top: 1.25rem; }
-  .bars { display: flex; gap: 0.4rem; align-items: flex-end; height: 120px; }
-  .bar { flex: 1; display: grid; grid-template-rows: 1fr auto; justify-items: center; height: 100%; align-items: end; }
+  .bars { display: flex; gap: 0.4rem; align-items: flex-end; height: 150px; }
+  .bar { flex: 1; display: grid; grid-template-rows: auto 1fr auto; justify-items: center; height: 100%; align-items: end; }
+  summary { cursor: pointer; min-height: 36px; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: '▸'; color: var(--muted); }
+  details[open] summary::before { content: '▾'; }
+  .aff p { margin: 0.1rem 0 0.5rem 1rem; }
+  .scroll { overflow-x: auto; margin-bottom: 0.75rem; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem 0.4rem 0; border-bottom: 1px solid var(--line); font-weight: 400; vertical-align: bottom; }
+  thead th { color: var(--muted); }
+  .empty p { margin-bottom: 0.75rem; }
   .fill { width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 3px; }
   .diary { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.35rem; }
   .diary li { display: flex; gap: 0.6rem; align-items: center; }
   .diary .muted { min-width: 6.5rem; }
   .diary a { color: var(--text); }
-  .sugg { list-style: none; padding: 0; margin: 0.75rem 0 0; }
-  .sugg .name { font-weight: 600; font-size: 0.92rem; }
 </style>

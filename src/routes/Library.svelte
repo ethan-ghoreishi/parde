@@ -66,7 +66,7 @@
 </div>
 
 <div class="controls stack">
-  <div class="row" role="group" aria-label="Status">
+  <div class="row status" role="group" aria-label="Status">
     {#each statusTabs as [k, label]}
       <button class="chip" class:on={status === k} aria-pressed={status === k} onclick={() => setParam('status', k)}>{label}</button>
     {/each}
@@ -103,9 +103,12 @@
 </div>
 
 {#if titles.ready && !titles.value.length}
-  <div class="empty">Your library is empty. <button class="small primary" onclick={() => (ui.searchOpen = true)}>Add a title</button></div>
+  <div class="empty">
+    <p>Nothing here yet.</p>
+    <div class="row centre"><a class="btn primary" href="#/discover">Start with what you have seen</a><button onclick={() => (ui.searchOpen = true)}>Search for a title</button></div>
+  </div>
 {:else if titles.ready && !list.length}
-  <div class="empty">Nothing matches these filters.</div>
+  <div class="empty">Nothing matches these filters. <button class="small" onclick={() => { q = ''; go('/library'); }}>Clear them</button></div>
 {:else}
   <ul class="grid lib">
     {#each list as t (t.id)}
@@ -124,9 +127,12 @@
 {/if}
 
 <style>
+  .status { gap: 0.3rem; }
+  .status .chip { padding: 0.15rem 0.56rem; }
   .controls { margin: 0.75rem 0 1.25rem; }
+  .centre { justify-content: center; }
   .filters input { flex: 2 1 200px; width: auto; }
-  .filters select { flex: 1 1 140px; width: auto; }
+  .filters select { flex: 1 1 130px; width: auto; min-width: 0; }
   .lib { list-style: none; padding: 0; margin: 0; }
   .tile { display: grid; gap: 0.3rem; text-decoration: none; color: var(--text); position: relative; }
   .tile:hover .name { color: var(--accent); }

@@ -18,7 +18,7 @@
   let work = $state<Credit[] | null>(null);
   let pics = $state<Record<string, string>>({});
   let error = $state('');
-  let busy = $state<string | null>(null);
+  let busy = $state<Record<string, boolean>>({});
   let role = $state<CreditRole | 'all'>('all');
   /** Titles marked seen here, so their row can ask for a rating */
   let justSeen = $state<Record<string, string>>({});
@@ -63,10 +63,11 @@
   });
 
   async function add(c: Credit, status: Status) {
-    busy = c.qid;
+    if (busy[c.qid]) return;
+    busy[c.qid] = true;
     try {
       let id: string;
-      if (c.kind === 'film') id = await addFilm(c.qid);
+      if (c.kind === 'film') id = await addFilm(c.qid, { status });
       else {
         const tvm = c.tvmaze ?? (await findShow(c.name, c.year));
         if (!tvm) throw new Error(`${c.name} is not on TVmaze, so Parde cannot track its episodes.`);
@@ -74,14 +75,12 @@
       }
       if (status === 'watched') {
         if (c.kind === 'show') await seenAllAired(id);
-        const t = await db.titles.get(id);
-        if (t && t.status !== 'watched') await update(id, { status: c.kind === 'show' && t.showStatus !== 'Ended' ? 'watching' : 'watched' });
         justSeen[c.qid] = id;
       } else toast(`${c.name} added to your list`);
     } catch (e) {
       toast(errorText(e), 'error');
     } finally {
-      busy = null;
+      busy[c.qid] = false;
     }
   }
 
@@ -144,7 +143,7 @@
             <div class="acts">
               {#if own}
                 <span class="small muted">{own.rating ? `${own.rating}/10` : own.status === 'want' ? 'On your list' : 'In library'}</span>
-              {:else if busy === c.qid}
+              {:else if busy[c.qid]}
                 <span class="small muted">Adding…</span>
               {:else}
                 <button class="small primary" onclick={() => add(c, 'want')}>Want</button>

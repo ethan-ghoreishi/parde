@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { parseImport, scaleOf, ownedOf, resolve, commit, type Item, type Outcome, type Row, type ShowPlan } from '../lib/importer';
+  import { readImport, scaleOf, ownedOf, likely, resolve, commit, type Item, type Outcome, type Row, type ShowPlan } from '../lib/importer';
+  import { setProgress } from '../lib/actions';
+  import { code } from '../lib/schedule';
   import { titleHref } from '../lib/router.svelte';
-  import { toast, errorText } from '../lib/ui.svelte';
+  import { toast, undoable, errorText } from '../lib/ui.svelte';
   import ProgressPicker from '../components/ProgressPicker.svelte';
   import { db } from '../lib/db';
 
@@ -17,12 +19,19 @@
   let outcome = $state<Outcome | null>(null);
   let names = $state<Record<string, string>>({});
 
-  const rows = $derived(parseImport(text, status, outOf));
+  const read = $derived(readImport(text, status, outOf));
+  const rows = $derived(read.rows);
   const scale = $derived(scaleOf(rows));
+  const unread = $derived(rows.filter((r) => r.unread));
+  const needsScale = $derived(scale.ambiguous && !outOf);
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
   const sure = $derived(items.filter((it) => it.sure && !ownedOf(it)));
   // Anything uncertain is shown, even when the best guess is already in your library: it may be the wrong one.
   const unsure = $derived(items.filter((it) => !it.sure && it.candidates.length));
-  const missing = $derived(items.filter((it) => !it.candidates.length));
+  const unchosen = $derived(unsure.filter((it) => it.pick < 0));
+  const guesses = $derived(unchosen.filter(likely));
+  const missing = $derived(items.filter((it) => !it.candidates.length && !it.error));
+  const unchecked = $derived(items.filter((it) => it.error && !it.candidates.length));
   const owned = $derived(items.filter((it) => it.sure && ownedOf(it)));
   const seenShows = $derived(items.filter((it) => it.pick >= 0 && it.candidates[it.pick]?.kind === 'show' && !ownedOf(it) && it.row.status === 'watched' && !it.row.upTo));
   // Distinct titles: a diary's rewatches are one title.
@@ -59,11 +68,25 @@
     }
   }
 
+  /** Ask again about the lines a service did not answer for; the rest of the review is kept. */
+  async function retry() {
+    const again = unchecked;
+    phase = 'matching';
+    progress = { done: 0, total: again.length };
+    try {
+      const fresh = await resolve(again.map((it) => $state.snapshot(it.row)), (done, total) => (progress = { done, total }));
+      for (const [i, it] of again.entries()) items[items.indexOf(it)] = fresh[i];
+    } catch (e) {
+      toast(errorText(e), 'error');
+    }
+    phase = 'review';
+  }
+
   async function add() {
     phase = 'adding';
     progress = { done: 0, total: toAdd };
     try {
-      outcome = await commit(items, plans, (done, total) => (progress = { done, total }));
+      outcome = await commit($state.snapshot(items), plans, (done, total) => (progress = { done, total }));
       names = Object.fromEntries((await db.titles.bulkGet(outcome.toPlace)).filter(Boolean).map((t) => [t!.id, t!.name]));
       phase = 'done';
     } catch (e) {
@@ -77,6 +100,15 @@
     return `${m.name}${m.year ? ` (${m.year})` : ''} · ${m.kind === 'show' ? 'series' : 'film'}${m.owned ? ' · in your library' : m.note ? ` · ${m.note.slice(0, 40)}` : ''}`;
   };
   const showIndex = (it: Item) => items.indexOf(it);
+
+  async function moveOn(a: Outcome['ahead'][number]) {
+    try {
+      undoable(`${a.name}: seen up to ${code(a.ep)}`, await setProgress(a.id, a.ep));
+      outcome = outcome && { ...outcome, ahead: outcome.ahead.filter((x) => x !== a) };
+    } catch (e) {
+      toast(`Not saved: ${errorText(e)}`, 'error');
+    }
+  }
 </script>
 
 <h1>Import your history</h1>
@@ -98,7 +130,7 @@
     {#if scale.ambiguous}
       <div class="row" role="group" aria-label="Ratings are out of">
         <span class="small muted">Your ratings are out of</span>
-        <button class="chip" class:on={outOf !== 10} aria-pressed={outOf !== 10} onclick={() => (outOf = 5)}>5 (stars)</button>
+        <button class="chip" class:on={outOf === 5} aria-pressed={outOf === 5} onclick={() => (outOf = 5)}>5 (stars)</button>
         <button class="chip" class:on={outOf === 10} aria-pressed={outOf === 10} onclick={() => (outOf = 10)}>10</button>
       </div>
     {/if}
@@ -107,9 +139,11 @@
       <button class="chip" class:on={status === 'watched'} aria-pressed={status === 'watched'} onclick={() => (status = 'watched')}>Seen</button>
       <button class="chip" class:on={status === 'want'} aria-pressed={status === 'want'} onclick={() => (status = 'want')}>Want to watch</button>
     </div>
+    {#if unread.length}<p class="small" role="status">{plural(unread.length, 'rating')} cannot be read (for example “{unread[0].unread}” for {unread[0].name}): not on a 10-point or 5-star scale. Those titles come in without one.</p>{/if}
+    {#if read.skipped}<p class="small muted">{plural(read.skipped, 'line')} left out: episodes, games, or no title.</p>{/if}
     <div class="row">
-      <button class="primary" onclick={match} disabled={!rows.length}>Find {rows.length || ''} title{rows.length === 1 ? '' : 's'}</button>
-      {#if fileName}<span class="small muted">{fileName}</span>{/if}
+      <button class="primary" onclick={match} disabled={!rows.length || needsScale}>Find {rows.length || ''} title{rows.length === 1 ? '' : 's'}</button>
+      {#if needsScale}<span class="small">First say what your ratings are out of.</span>{:else if fileName}<span class="small muted">{fileName}</span>{/if}
     </div>
     <p class="small muted">Matching asks Wikidata, Wikipedia and TVmaze about each title. Large lists take a few minutes; keep this page open.</p>
   </section>
@@ -124,20 +158,28 @@
     <p>
       <strong>{sure.length}</strong> ready ·
       <strong>{unsure.length}</strong> to check ·
-      <strong>{missing.length}</strong> not found{owned.length ? ` · ${owned.length} already in your library` : ''}
+      <strong>{missing.length}</strong> not found{owned.length ? ` · ${owned.length} already in your library` : ''}{unchecked.length ? ` · ${unchecked.length} not checked` : ''}
     </p>
+
+    {#if unchecked.length}
+      <div class="card stack" role="alert">
+        <p>{plural(unchecked.length, 'line')} could not be checked: {unchecked[0].error}</p>
+        <button onclick={retry}>Try {unchecked.length === 1 ? 'it' : 'them'} again</button>
+      </div>
+    {/if}
 
     {#if unsure.length}
       <div class="card stack">
         <h2>Check these</h2>
-        <p class="small muted">More than one title fits. The first choice is the best guess; pick another or skip.</p>
+        <p class="small muted">More than one title could be meant, so nothing is chosen for you. Pick one, or leave it out.</p>
+        {#if guesses.length > 1}<button class="small" onclick={() => guesses.forEach((it) => (it.pick = 0))}>Use the best guess for {guesses.length} of them</button>{/if}
         <ul class="rows">
           {#each unsure as it (it.row.line)}
             <li>
               <span class="raw">“{it.row.raw}”</span>
               <select aria-label="Match for {it.row.raw}" bind:value={it.pick}>
+                <option value={-1}>Leave out</option>
                 {#each it.candidates as _, i}<option value={i}>{label(it, i)}</option>{/each}
-                <option value={-1}>Skip</option>
               </select>
             </li>
           {/each}
@@ -186,6 +228,7 @@
 
     <div class="row">
       <button class="primary" onclick={add} disabled={!toAdd}>{toAdd - toUpdate ? `Add ${toAdd - toUpdate} title${toAdd - toUpdate === 1 ? '' : 's'}` : 'Update'}{toAdd - toUpdate && toUpdate ? ` and update ${toUpdate}` : ''}</button>
+      {#if unchosen.length}<span class="small muted">{unchosen.length} left out</span>{/if}
       <button class="ghost" onclick={() => (phase = 'input')}>Back</button>
     </div>
   </section>
@@ -200,7 +243,15 @@
       <h3>Where are you in these?</h3>
       <ul class="rows">
         {#each outcome.toPlace as id (id)}
-          <li><a href={titleHref(id)}>{names[id] ?? id}</a><ProgressPicker titleId={id} label="" /></li>
+          <li><a href={titleHref(id)}>{names[id] ?? id}</a><ProgressPicker titleId={id} label="Seen up to" /></li>
+        {/each}
+      </ul>
+    {/if}
+    {#if outcome.ahead.length}
+      <h3>Your list is further on in these</h3>
+      <ul class="rows">
+        {#each outcome.ahead as a (a.id)}
+          <li><span class="raw"><a href={titleHref(a.id)}>{a.name}</a> <span class="small muted">here {a.here}, in your list {code(a.ep)}</span></span><button class="small" onclick={() => moveOn(a)}>Move to {code(a.ep)}</button></li>
         {/each}
       </ul>
     {/if}
@@ -213,7 +264,7 @@
     <div class="row">
       <a class="btn primary" href="#/library">See your library</a>
       <a class="btn" href="#/taste">See your taste</a>
-      <button class="ghost" onclick={() => { text = ''; fileName = ''; phase = 'input'; }}>Import more</button>
+      <button class="ghost" onclick={() => { text = ''; fileName = ''; outOf = undefined; phase = 'input'; }}>Import more</button>
     </div>
   </section>
 {/if}
