@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { trailerInstinct, versusCritics, scoreCandidates, scoreBands, scoreText, compare, drawnOutcomes, makerAffinity, castAffinity, contradictions, pearson } from '../../src/lib/taste';
+import { trailerInstinct, versusCritics, scoreCandidates, scoreBands, scoreCases, scoreText, compare, drawnOutcomes, makerAffinity, castAffinity, contradictions, pearson } from '../../src/lib/taste';
 import { questionsFor, recapPrompt, reflectPrompt } from '../../src/lib/handoff';
 import type { Title } from '../../src/lib/db';
 
@@ -15,7 +15,7 @@ describe('insights', () => {
     expect(Number.isNaN(pearson([[1, 1]]))).toBe(true);
   });
   it('trailer instinct finds surprises and letdowns', () => {
-    const ts = [T({ expectation: 1, rating: 9 }), T({ expectation: 5, rating: 2 }), T({ expectation: 3, rating: 5 })];
+    const ts = [T({ expectation: 1, rating: 9 }), T({ expectation: 5, rating: 2 }), T({ expectation: 3, rating: 5 })].map((t) => ({ ...t, expectedAt: '2026-01-01', firstWatchedAt: '2026-01-02', instinctRecorded: true }));
     const r = trailerInstinct(ts);
     expect(r.n).toBe(3);
     expect(r.surprises[0].title).toBe(ts[0]);
@@ -37,8 +37,8 @@ describe('insights', () => {
   });
   it('ignores expectations recorded after watching', () => {
     const r = trailerInstinct([
-      T({ expectation: 5, rating: 9, expectedAt: '2026-01-01T10:00:00Z', finishedAt: '2026-02-01' }),
-      T({ expectation: 5, rating: 9, expectedAt: '2026-03-01T10:00:00Z', finishedAt: '2026-02-01' }),
+      T({ expectation: 5, rating: 9, expectedAt: '2026-01-01T10:00:00Z', finishedAt: '2026-02-01', firstWatchedAt: '2026-02-01', instinctRecorded: true }),
+      T({ expectation: 5, rating: 9, expectedAt: '2026-03-01T10:00:00Z', finishedAt: '2026-02-01', firstWatchedAt: '2026-02-01', instinctRecorded: true }),
     ]);
     expect(r.n).toBe(1);
   });
@@ -83,15 +83,15 @@ describe('scores and you', () => {
   it('keeps choices made without the scores apart from choices made with them, and from enjoyment', () => {
     const b = scoreBands(
       [
-        T({ status: 'want', critics: rt(40), chosenAt: '2026-01-02', scoresAt: undefined }),
-        T({ status: 'want', critics: rt(40), chosenAt: '2026-01-02', scoresAt: '2026-01-03' }), // opened only afterwards
-        T({ status: 'want', critics: rt(90), chosenAt: '2026-01-02', scoresAt: '2026-01-01' }),
+        T({ status: 'want', critics: rt(91), choiceScores: rt(40), chosenAt: '2026-01-02', scoresAt: undefined }),
+        T({ status: 'want', critics: rt(91), choiceScores: rt(40), chosenAt: '2026-01-02', scoresAt: '2026-01-03' }), // opened only afterwards
+        T({ status: 'want', choiceScores: rt(90), chosenAt: '2026-01-02', scoresAt: '2026-01-01' }),
         T({ rating: 8, critics: rt(45) }),
-        T({ status: 'want', critics: rt(10) }), // not chosen in Discover: says nothing about instinct
+        T({ status: 'want', critics: rt(10), chosenAt: '2026-01-02' }), // not chosen in Discover: says nothing about instinct
       ],
       [
-        { qid: 'Q91', at: '2026-01-02', name: 'x', critics: rt(30), scoresAt: '2026-01-01' },
-        { qid: 'Q92', at: '2026-01-02', name: 'y', critics: rt(95) },
+        { qid: 'Q91', at: '2026-01-02', name: 'x', measured: true, critics: rt(30), scoresAt: '2026-01-01' },
+        { qid: 'Q92', at: '2026-01-02', name: 'y', measured: true, critics: rt(95) },
         { qid: 'Q93', at: '2026-01-02' }, // from an earlier version: nothing known about it
       ],
     );
@@ -100,6 +100,16 @@ describe('scores and you', () => {
       [[], { yes: 0, n: 0 }, { yes: 0, n: 0 }],
       [[8], { yes: 2, n: 2 }, { yes: 0, n: 1 }],
     ]);
+  });
+  it('tests named score rules only against comparable source snapshots', () => {
+    const rt = { source: 'Rotten Tomatoes', score: 92, value: '92%', asOf: '2025-07' };
+    const audience = { source: 'Rotten Tomatoes audience', score: 60, value: '60%', asOf: '2025-12' };
+    const imdb = { source: 'IMDb', score: 81, value: '8.1/10', asOf: '2020-01' };
+    const rated = T({ rating: 9, critics: [rt, audience, imdb] });
+    const cases = scoreCases([rated, T({ chosenAt: '2026-01-01', choiceScores: [], critics: [rt, audience] })], []);
+    expect(cases[2].liked).toEqual([rated]);
+    expect(cases[2].chosen.n).toBe(0);
+    expect(cases[4].liked).toEqual([]);
   });
   it('says two groups differ only with enough titles and more than chance', () => {
     expect(compare([9, 9, 9, 9], [1, 1, 1, 1])).toBe('few');
@@ -119,9 +129,9 @@ describe('scores and you', () => {
     ]);
   });
   it('knows which keenness came before the scores, which after, and which it cannot know', () => {
-    const t = (o: Partial<Title>) => T({ expectation: 4, rating: 7, expectedAt: '2026-01-05', ...o });
-    const r = trailerInstinct([t({}), t({ edited: { expectation: '2026-01-05' } }), t({ edited: { expectation: '2026-01-05' }, scoresAt: '2026-01-01' })]);
-    expect([r.n, r.blind, r.aware]).toEqual([3, 1, 1]);
+    const t = (o: Partial<Title>) => T({ expectation: 4, rating: 7, expectedAt: '2026-01-05', firstWatchedAt: '2026-01-06', ...o });
+    const r = trailerInstinct([t({}), t({ instinctRecorded: true, edited: { expectation: '2026-01-05' } }), t({ instinctRecorded: true, edited: { expectation: '2026-01-05' }, scoresAt: '2026-01-01' })]);
+    expect([r.n, r.blind, r.aware]).toEqual([2, 1, 1]);
   });
 });
 
@@ -165,7 +175,7 @@ describe('handoff', () => {
     }
     expect(reflectPrompt(show, [], mid)).toContain('I am watching');
     expect(reflectPrompt(show, [], { skipped: 0, unlisted: 0 })).toContain('Ask me how far I am');
-    expect(reflectPrompt(show, [], { lastSeen: ep, skipped: 0, unlisted: 0 })).toContain('Spoilers are fine'); // seen to the end
+    expect(reflectPrompt(show, [], { lastSeen: ep, skipped: 0, unlisted: 0, scheduleVerified: true })).toContain('Spoilers are fine'); // seen to the end
     expect(reflectPrompt({ ...show, showStatus: 'Running' }, [], { lastSeen: ep, skipped: 0, unlisted: 0 })).toContain('only up to and including'); // caught up, not over
     expect(reflectPrompt(T({ name: 'Heat' }))).toContain('Spoilers are fine');
     for (let i = 0; i < 40; i++) expect(questionsFor(`tvm:${i}`, false).join()).not.toMatch(/ending/);
@@ -175,7 +185,7 @@ describe('handoff', () => {
 import { reviewPrompt, parseThemes } from '../../src/lib/handoff';
 describe('review prompt', () => {
   it('uses only what you said, marks guesses, and closes the themes loop', () => {
-    const t = T({ name: 'Past Lives', year: 2023, rating: 9, partnerRating: 7, themes: ['memory', 'belonging'], note: 'the bar scene', expectation: 3, expectedAt: '2026-01-01', finishedAt: '2026-02-01' });
+    const t = T({ name: 'Past Lives', year: 2023, rating: 9, partnerRating: 7, themes: ['memory', 'belonging'], note: 'the bar scene', expectation: 3, expectedAt: '2026-01-01', finishedAt: '2026-02-01', firstWatchedAt: '2026-02-01', instinctRecorded: true });
     const p = reviewPrompt(t, [t], { length: 'short', spoilers: false });
     expect(p).toContain('My rating: 9/10 (my partner: 7/10)'); // no one else's name leaves the device
     expect(p).toContain('memory, belonging');

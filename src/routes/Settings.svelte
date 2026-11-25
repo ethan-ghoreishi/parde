@@ -56,15 +56,19 @@
     if (r.mode === 'replace') return `Replaced: ${n(r.added, 'title')}, ${n(r.marks, 'episode')} seen, ${n(r.links, 'source')}, ${n(r.watches, 'viewing')}.`;
     const parts = [
       r.added && `${n(r.added, 'title')} added`, r.updated && `${n(r.updated, 'title')} updated`, r.marks && `${n(r.marks, 'episode')} marked seen`,
-      r.links && `${n(r.links, 'source')} added`, r.watches && `${n(r.watches, 'viewing')} added`,
+      r.links && `${n(r.links, 'source')} added`, r.linkEdits && `${n(r.linkEdits, 'source')} updated`,
+      r.recovered && `${n(r.recovered, 'other record')} recovered`, r.watches && `${n(r.watches, 'viewing')} added`,
     ].filter(Boolean);
-    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'thing')} you had removed here left out.` : ''}`;
+    return `${parts.length ? `Merged: ${parts.join(', ')}.` : 'Nothing new in that file.'}${r.leftOut ? ` ${n(r.leftOut, 'record')} skipped because of a deletion or conflict.` : ''}`;
   }
   let done = $state('');
 
   let pending = $state.raw<{ backup: Backup; counts: Record<string, number>; name: string; problems: string[] } | null>(null);
   let importError = $state('');
+  let reading = 0;
+  let restoring = $state(false);
   async function pick(e: Event) {
+    const read = ++reading;
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
     (e.currentTarget as HTMLInputElement).value = '';
     importError = '';
@@ -72,20 +76,28 @@
     pending = null;
     if (!file) return;
     if (file.size > 50 * 1024 * 1024) return (importError = 'That file is too large to be a Parde backup.');
-    const parsed = parseBackup(await file.text());
-    if (!parsed.ok) return (importError = parsed.error);
-    pending = { backup: parsed.backup, counts: parsed.counts, name: file.name, problems: parsed.problems };
+    try {
+      const parsed = parseBackup(await file.text());
+      if (read !== reading) return;
+      if (!parsed.ok) return (importError = parsed.error);
+      pending = { backup: parsed.backup, counts: parsed.counts, name: file.name, problems: parsed.problems };
+    } catch (e) {
+      if (read === reading) importError = errorText(e);
+    }
   }
 
   async function apply(mode: 'merge' | 'replace') {
-    if (!pending) return;
+    if (!pending || restoring) return;
     if (mode === 'replace' && !confirm(`Replace everything in this browser with ${pending.name}? What is here now is kept aside so you can undo this straight afterwards.`)) return;
+    restoring = true;
     try {
       done = summary(await restore(pending.backup, mode));
       pending = null;
       toast(mode === 'merge' ? 'Merged' : 'Restored', 'ok', { label: 'Undo', run: () => undo(false) });
     } catch (e) {
       toast(`Nothing was changed: ${errorText(e)}`, 'error');
+    } finally {
+      restoring = false;
     }
   }
 
@@ -160,7 +172,7 @@
     <div class="card preview stack" role="region" aria-label="Backup preview">
       <p class="small"><strong>{pending.name}</strong>{pending.backup.exportedAt ? `, made ${formatDay(pending.backup.exportedAt.slice(0, 10))}` : ''}: {pending.counts.titles} titles, {pending.counts.links} sources, {pending.counts.seen} episodes seen, {pending.counts.watches} viewings.</p>
       <div class="row">
-        <button class="primary" onclick={() => apply('merge')}>Merge into this browser</button>
+        <button class="primary" disabled={restoring} onclick={() => apply('merge')}>Merge into this browser</button>
         {#if !pending.problems.length}<button class="danger" onclick={() => apply('replace')}>Replace everything</button>{/if}
         <button class="ghost" onclick={() => (pending = null)}>Cancel</button>
       </div>
@@ -171,7 +183,7 @@
           {#if pending.problems.length > 5}<p>…and {pending.problems.length - 5} more.</p>{/if}
         </div>
       {/if}
-      <p class="small muted">Merge keeps everything here and adds what is missing. Where both have a title, your latest edit of each thing (rating, note, status…) wins, and what you removed here stays removed. Either way you can undo it.</p>
+      <p class="small muted">Merge adds missing records and uses the latest dated edits. Deletions made on this device stay in effect. Undo swaps back to the collection you had immediately before the restore.</p>
     </div>
   {/if}
   {#if done}<p class="small" role="status">{done}</p>{/if}

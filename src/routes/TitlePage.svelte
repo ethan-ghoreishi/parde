@@ -2,7 +2,7 @@
   import { db, getSetting, type Status, type Title } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { update, setStatus, setExpectation, refreshTitle, removeTitle, sawScores, setSeen, seenUpTo, deleteWatch, editLink, type Undo } from '../lib/actions';
-  import { progress, code, release, isAired, localDay, byOrder, onCalendar } from '../lib/schedule';
+  import { progress, completeSchedule, code, release, isAired, localDay, byOrder, onCalendar } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf } from '../lib/links';
   import { formatDay, ago, runtime } from '../lib/format';
   import { EXPECTATIONS } from '../lib/taste';
@@ -36,7 +36,7 @@
   const prog = $derived(progress(epsQ.value, seen));
   const next = $derived(prog.next);
   const nextSources = $derived(t?.kind === 'show' && next ? resolveLinks(linksQ.value, next.season, next.number) : resolveLinks(linksQ.value));
-  const best = $derived(nextSources.find((r) => !r.link.broken));
+  const best = $derived(nextSources.find((r) => !r.broken));
   const rel = $derived(t ? release(t) : { kind: 'unknown' as const });
   const recent = $derived(epsQ.value.filter((e) => seen.has(e.id) && e.summary).slice(-3));
   // One line per person: "Denis Villeneuve — director, writer"
@@ -47,11 +47,12 @@
   const cast = $derived(t?.people.filter((p) => p.role === 'cast') ?? []);
   // Once you have started or watched it, "how keen were you?" would be hindsight: keep it as it was.
   const expectationLocked = $derived(
-    !!t && (t.status === 'watched' || t.status === 'watching' || t.status === 'paused' || t.rating !== undefined || prog.seenCount > 0),
+    !!t && (t.status === 'watched' || t.status === 'watching' || t.status === 'paused' || t.firstWatchedAt || t.finishedAt || t.rating !== undefined || prog.seenCount > 0),
   );
   /** Not started: what you need is what it is and where to find it, not somewhere to write about it */
   const ahead = $derived(!!t && !expectationLocked && t.status !== 'dropped');
-  const finished = $derived(!!t && finishedAll(t, prog));
+  const place = $derived({ ...prog, scheduleVerified: !!t && completeSchedule(t, epsQ.value) });
+  const finished = $derived(!!t && finishedAll(t, place));
   $effect(() => {
     if (t) document.title = `${t.name} · Parde`;
   });
@@ -59,11 +60,14 @@
   let logOpen = $state(false);
   let note = $state<string | undefined>(undefined);
   let refreshing = $state(false);
+  let noteWrite = 0;
+  let submittedNote: string | undefined;
   let showTrailer = $state(false);
 
   // Keep the draft local while typing; save on pause and on leaving the field.
   let noteTimer: ReturnType<typeof setTimeout>;
   function onNote() {
+    noteWrite++;
     noteState = '';
     clearTimeout(noteTimer);
     noteTimer = setTimeout(saveNote, 800);
@@ -71,12 +75,14 @@
   let noteState = $state<'' | 'saving' | 'saved'>('');
   function saveNote() {
     clearTimeout(noteTimer);
-    if (!t || note === undefined || note === (t.note ?? '')) return;
+    if (!t || note === undefined || note === (submittedNote ?? t.note ?? '')) return;
+    submittedNote = note;
+    const write = ++noteWrite;
     noteState = 'saving';
     update(t.id, { note }).then(
-      () => (noteState = 'saved'),
+      () => { if (write === noteWrite) noteState = 'saved'; },
       (e) => {
-        noteState = '';
+        if (write === noteWrite) { submittedNote = undefined; noteState = ''; }
         toast(`Your note is not saved: ${errorText(e)}`, 'error');
       },
     );
@@ -101,7 +107,7 @@
   async function openBest() {
     if (!best) return;
     if (!openExternal(best.url)) return toast('That link is not valid. Edit it below.', 'error');
-    await editLink(best.link.id, { usedAt: now() });
+    await editLink(best.link.id, { usedAt: now() }).catch((e) => toast(errorText(e), 'error'));
   }
 
   async function refresh() {
@@ -160,7 +166,7 @@
   const prompt = $derived.by(() => {
     if (!t) return '';
     const cur = { ...t, note: note ?? t.note };
-    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts, prog) : reflectPrompt(cur, libraryQ.value, prog);
+    return mode === 'review' ? reviewPrompt(cur, libraryQ.value, opts, place) : reflectPrompt(cur, libraryQ.value, place);
   });
   function send(where: 'copy' | keyof typeof ASSISTANTS) {
     saveNote();
@@ -214,7 +220,7 @@
             {#if !best}<a class="small" href="#sources" onclick={(e) => { e.preventDefault(); document.getElementById('sources')?.scrollIntoView(); }}>Add where you watch it ↓</a>{/if}
             <ProgressPicker titleId={t.id} label={prog.seenCount ? 'Seen up to' : 'Seen some already? Up to'} />
           {:else if t.kind === 'show' && epsQ.value.length}
-            <p>You are all caught up.{t.showStatus === 'Ended' ? '' : ' New episodes will appear on your calendar.'}</p>
+            <p>{finished ? 'You’ve finished the series.' : t.showStatus === 'Ended' ? 'You’ve reached the end of the available schedule. Check the episode list if anything is missing.' : 'There are no more dated episodes in this schedule.'}</p>
             {#if t.status !== 'watched'}<button onclick={() => (logOpen = true)}>Log as finished</button>{/if}
             <ProgressPicker titleId={t.id} />
           {:else if t.kind === 'film'}
@@ -253,7 +259,7 @@
       <div class="main-col">
         {#if expectationLocked}
           {#if t.expectation}
-            <p class="small muted">Before watching you were <strong>{EXPECTATIONS[t.expectation].toLowerCase()}</strong> after the trailer.{t.drawn?.length ? ` What drew you: ${t.drawn.join(', ')}.` : ''}</p>
+            <p class="small muted">Recorded keenness: <strong>{EXPECTATIONS[t.expectation].toLowerCase()}</strong>.{t.drawn?.length ? ` What drew you: ${t.drawn.join(', ')}.` : ''}</p>
           {/if}
         {:else if ahead}
           <section class="section">

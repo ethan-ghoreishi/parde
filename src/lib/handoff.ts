@@ -27,8 +27,8 @@ export function questionsFor(id: string, finished = true, n = 3): string[] {
 }
 
 /** How far into a series you are, for anything that could spoil it. Nothing for a film, or a series seen to its end. */
-export type Place = Pick<Progress, 'lastSeen' | 'next' | 'skipped' | 'unlisted'>;
-export const finishedAll = (t: Title, p: Place) => t.kind === 'film' || (!!p.lastSeen && !p.next && !p.skipped && !p.unlisted && t.showStatus === 'Ended');
+export type Place = Pick<Progress, 'lastSeen' | 'next' | 'skipped' | 'unlisted'> & { scheduleVerified?: boolean };
+export const finishedAll = (t: Title, p: Place) => t.kind === 'film' || (p.scheduleVerified === true && !!p.lastSeen && !p.next && !p.skipped && !p.unlisted);
 
 function spoilerRule(t: Title, p: Place | undefined, ok: string): string {
   if (t.kind === 'film' || (p && finishedAll(t, p))) return ok;

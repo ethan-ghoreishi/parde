@@ -41,6 +41,22 @@ export const byOrder = (a: Episode, b: Episode) => a.season - b.season || a.numb
 
 export const code = (e: Pick<Episode, 'season' | 'number'>) => `S${two(e.season)}E${two(e.number)}`;
 
+/** An ended label alone cannot establish that the last episode is in our list. */
+export function completeSchedule(t: Pick<Title, 'showStatus' | 'endedOn' | 'episodeOrders'>, episodes: Episode[]) {
+  if (t.showStatus !== 'Ended' || !episodes.length) return false;
+  const ordered = [...episodes].sort(byOrder);
+  const orders = t.episodeOrders;
+  const last = ordered.at(-1)!;
+  const verifiedEnd = orders?.length
+    ? orders.length === last.season && orders.every((n, i) => n === ordered.filter((e) => e.season === i + 1).length)
+    : !!t.endedOn && last.airdate === t.endedOn;
+  return verifiedEnd && ordered.every((e, i) => {
+    if (e.missingSince || !isAired(e)) return false;
+    const prev = ordered[i - 1];
+    return prev?.season === e.season ? e.number === prev.number + 1 : e.number === 1 && e.season === (prev?.season ?? 0) + 1;
+  });
+}
+
 export interface Progress {
   /** The episode after the furthest one seen: where you are, even if you skipped something earlier */
   next?: Episode;
@@ -63,10 +79,11 @@ export const onCalendar = (t: Pick<Title, 'followed' | 'status'>) => !!t.followe
 
 export function progress(episodes: Episode[], seen: Set<number>, now = new Date()): Progress {
   const sorted = episodes.filter((e) => isListed(e, seen)).sort(byOrder);
-  const last = sorted.findLastIndex((e) => seen.has(e.id));
-  const ahead = sorted.slice(last + 1);
+  const currentSlots = new Set(sorted.filter((e) => !e.missingSince).map(code));
+  const last = sorted.findLastIndex((e) => seen.has(e.id) && (!e.missingSince || !currentSlots.has(code(e))));
+  const ahead = sorted.slice(last + 1).filter((e) => !e.missingSince);
   return {
-    next: ahead[0],
+    next: ahead.find((e) => isAired(e, now)) ?? ahead.find((e) => e.airdate),
     unseenAired: ahead.filter((e) => isAired(e, now)).length,
     seenCount: sorted.filter((e) => seen.has(e.id)).length,
     total: sorted.length,

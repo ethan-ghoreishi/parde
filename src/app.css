@@ -27,7 +27,7 @@
     --surface-2: #f0e9df;
     --line: #e2d7c9;
     --text: #1f1a16;
-    --muted: #6d6157;
+    --muted: #5f544a;
     --accent: #98500f;
     --accent-ink: #ffffff;
     --curtain: #9e2a2b;
@@ -204,7 +204,7 @@ dialog::backdrop { background: rgb(0 0 0 / 0.6); }
 
 /* One row, even ten across on a phone. */
 .scale { display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); gap: 0.25rem; max-width: calc(var(--n) * 3rem); }
-@media (max-width: 360px) { .scale:not(.words) { grid-template-columns: repeat(min(var(--n), 5), minmax(0, 1fr)); } }
+@media (max-width: 420px) { .scale:not(.words) { grid-template-columns: repeat(min(var(--n), 5), minmax(0, 1fr)); } }
 .scale.words { display: flex; flex-wrap: wrap; max-width: none; }
 .scale button { min-width: 0; padding: 0; border-radius: 10px; }
 .scale.words button { padding: 0 0.8rem; border-radius: 999px; }

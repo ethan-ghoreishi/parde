@@ -23,7 +23,7 @@ export interface CriticScore {
 }
 
 /** The parts of a title you set yourself; everything else is looked up. */
-export const USER_FIELDS = ['status', 'followed', 'expectation', 'rating', 'partnerRating', 'themes', 'note', 'drawn'] as const;
+export const USER_FIELDS = ['status', 'followed', 'expectation', 'rating', 'partnerRating', 'themes', 'note', 'drawn', 'finishedAt'] as const;
 export type UserField = (typeof USER_FIELDS)[number];
 
 export interface Title {
@@ -55,6 +55,8 @@ export interface Title {
   channelCountry?: string;
   /** TVmaze: Running, Ended, To Be Determined, In Development */
   showStatus?: string;
+  endedOn?: string;
+  episodeOrders?: number[];
   /** TVmaze `updated` stamp, to skip refetching unchanged shows */
   tvmUpdated?: number;
 
@@ -74,6 +76,9 @@ export interface Title {
   /** Discover: when you chose to want it, and when Parde first showed you its scores before you had seen it */
   chosenAt?: string;
   scoresAt?: string;
+  choiceScores?: CriticScore[];
+  firstWatchedAt?: string;
+  instinctRecorded?: boolean;
   /** What drew you to it (Discover, optional) */
   drawn?: string[];
   /** When you last changed each of these yourself, clearing included, so a merge keeps the newer edit */
@@ -126,6 +131,8 @@ export interface Link {
   url: string;
   label?: string;
   broken?: boolean;
+  failedEpisodes?: string[];
+  editedAt?: string;
   addedAt: string;
   usedAt?: string;
 }
@@ -142,6 +149,9 @@ export interface Dismissed {
   name?: string;
   year?: number;
   critics?: CriticScore[];
+  kind?: Kind;
+  tvmaze?: number;
+  measured?: boolean;
   scoresAt?: string;
 }
 

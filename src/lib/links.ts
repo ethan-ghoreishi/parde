@@ -19,7 +19,7 @@ export function expand(url: string, season: number, episode: number): string {
  */
 export function cleanUrl(input: string): string | null {
   let s = input.trim();
-  if (!s || /\s/.test(s)) return null;
+  if (!s || /[\s\\\u0000-\u001f\u007f]/.test(s)) return null;
   if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) {
     if (!/^[\w-]+(\.[\w-]+)+(:\d+)?([/?#]|$)/.test(s)) return null;
     s = `https://${s}`;
@@ -31,6 +31,7 @@ export function cleanUrl(input: string): string | null {
     return null;
   }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (isPattern(s.split(/[/?#]/).slice(0, 3).join('/'))) return null;
   if (u.username || u.password || !u.hostname.includes('.') && u.hostname !== 'localhost') return null;
   return s;
 }
@@ -80,10 +81,11 @@ export interface Resolved {
   link: Link;
   url: string;
   level: Level;
+  broken?: boolean;
 }
 
 const order = (a: Resolved, b: Resolved) =>
-  Number(!!a.link.broken) - Number(!!b.link.broken) ||
+  Number(!!a.broken) - Number(!!b.broken) ||
   (b.link.usedAt ?? '').localeCompare(a.link.usedAt ?? '') ||
   b.link.addedAt.localeCompare(a.link.addedAt);
 
@@ -94,17 +96,18 @@ const order = (a: Resolved, b: Resolved) =>
  */
 export function resolveLinks(links: Link[], season?: number, episode?: number): Resolved[] {
   if (season === undefined || episode === undefined) {
-    return links.filter((l) => l.season === undefined).map((link) => ({ link, url: link.url, level: 'title' as const })).sort(order);
+    return links.filter((l) => l.season === undefined).map((link) => ({ link, url: link.url, level: 'title' as const, broken: link.broken })).sort(order);
   }
   const ep: Resolved[] = [];
   const se: Resolved[] = [];
   const pat: Resolved[] = [];
   const show: Resolved[] = [];
   for (const link of links) {
-    if (link.season === season && link.episode === episode) ep.push({ link, url: link.url, level: 'episode' });
-    else if (link.season === season && link.episode === undefined) se.push({ link, url: expand(link.url, season, episode), level: 'season' });
-    else if (link.season === undefined && isPattern(link.url)) pat.push({ link, url: expand(link.url, season, episode), level: 'show' });
-    else if (link.season === undefined) show.push({ link, url: link.url, level: 'show' });
+    const broken = link.broken || link.failedEpisodes?.includes(`${season}:${episode}`);
+    if (link.season === season && link.episode === episode) ep.push({ link, url: link.url, level: 'episode', broken });
+    else if (link.season === season && link.episode === undefined) se.push({ link, url: expand(link.url, season, episode), level: 'season', broken });
+    else if (link.season === undefined && isPattern(link.url)) pat.push({ link, url: expand(link.url, season, episode), level: 'show', broken });
+    else if (link.season === undefined) show.push({ link, url: link.url, level: 'show', broken });
   }
   return [...ep.sort(order), ...se.sort(order), ...pat.sort(order), ...show.sort(order)];
 }

@@ -4,7 +4,7 @@
   import { progress, code, isAired, isListed, localDay, dayKey, byOrder, onCalendar } from '../lib/schedule';
   import { resolveLinks, openExternal, hostOf, type Resolved } from '../lib/links';
   import { scoreCandidates, type Candidate, type PickFilter } from '../lib/taste';
-  import { setSeen, editLink } from '../lib/actions';
+  import { setSeen, editLink, markSource } from '../lib/actions';
   import { titleHref } from '../lib/router.svelte';
   import { formatDay, runtime } from '../lib/format';
   import { ui, toast, undoable, errorText, clock } from '../lib/ui.svelte';
@@ -38,7 +38,7 @@
     return m;
   });
 
-  const working = (t: Title, e?: Episode) => resolveLinks(data.value.links.filter((l) => l.titleId === t.id), e?.season, e?.number).filter((r) => !r.link.broken);
+  const working = (t: Title, e?: Episode) => resolveLinks(data.value.links.filter((l) => l.titleId === t.id), e?.season, e?.number).filter((r) => !r.broken);
 
   const continuing = $derived(
     data.value.titles
@@ -86,16 +86,17 @@
   );
 
   /** The source just opened from here, so the next one is a tap away if it did not work. */
-  let tried = $state.raw<{ titleId: string; src: Resolved } | null>(null);
-  async function watch(t: Title, src: Resolved) {
+  let tried = $state.raw<{ titleId: string; src: Resolved; ep?: Episode } | null>(null);
+  async function watch(t: Title, src: Resolved, ep?: Episode) {
     if (!openExternal(src.url)) return toast('That link is not valid. Edit it under Sources.', 'error');
-    tried = { titleId: t.id, src };
-    await editLink(src.link.id, { usedAt: now() });
+    tried = { titleId: t.id, src, ep };
+    await editLink(src.link.id, { usedAt: now() }).catch((e) => toast(errorText(e), 'error'));
   }
   async function tryNext(t: Title, next: Resolved) {
-    const broken = tried!.src.link.id;
-    await watch(t, next); // opened first, inside the tap
-    await editLink(broken, { broken: true });
+    const prior = tried;
+    if (!prior) return;
+    await watch(t, next, prior.ep);
+    await markSource(prior.src.link.id, true, prior.ep?.season, prior.ep?.number).catch((e) => toast(errorText(e), 'error'));
   }
 
   /** The next episode takes the same place on screen: a second tap just after must not mark it too. */
@@ -144,7 +145,7 @@
 {#snippet sources(t: Title, e: Episode | undefined, srcs: Resolved[])}
   {@const src = srcs[0]}
   {#if src}
-    <button class="small primary" onclick={() => watch(t, src)}>Watch on {src.link.label || hostOf(src.url)} ↗</button>
+    <button class="small primary" onclick={() => watch(t, src, e)}>Watch on {src.link.label || hostOf(src.url)} ↗</button>
   {/if}
   {#if src}
     <button class="small" onclick={() => openSheet(t, e)} aria-label="Sources for {t.name}{e ? ` ${code(e)}` : ''}">Sources{srcs.length > 1 ? ` (${srcs.length})` : ''}</button>
@@ -152,8 +153,8 @@
     <button class="small" onclick={() => openSheet(t, e)}>{e ? 'Add a source' : 'Where to watch'}</button>
   {/if}
 {/snippet}
-{#snippet didntWork(t: Title, srcs: Resolved[])}
-  {#if tried?.titleId === t.id}
+{#snippet didntWork(t: Title, srcs: Resolved[], ep?: Episode)}
+  {#if tried?.titleId === t.id && tried.ep?.id === ep?.id}
     {@const next = srcs.find((r) => r.link.id !== tried!.src.link.id)}
     <p class="small tried" role="status">
       <span class="muted">{tried.src.link.label || hostOf(tried.src.url)} didn't work?</span>
@@ -178,7 +179,7 @@
               {@render sources(t, p.next, srcs)}
               <button class="small" onclick={() => seenNext(t, p.next!)} disabled={settling[t.id]} aria-label="{t.name} {code(p.next!)} seen">Seen</button>
             </div>
-            {@render didntWork(t, srcs)}
+            {@render didntWork(t, srcs, p.next)}
           </div>
         </li>
       {/each}
@@ -228,7 +229,7 @@
             {@render sources(t, pick.c.episode, working(t, pick.c.episode))}
             {#if picks.length > 1}<button class="small" onclick={() => skip++}>Another</button>{/if}
           </div>
-          {@render didntWork(t, working(t, pick.c.episode))}
+          {@render didntWork(t, working(t, pick.c.episode), pick.c.episode)}
         </div>
       </div>
       <p class="small muted">Ordered by your keenness, the people you rate and how long it has waited, not by scores.</p>

@@ -2,7 +2,7 @@
   import type { Link, Title } from '../lib/db';
   import { resolveLinks, hostOf, isPattern, suggestPattern, openExternal, cleanUrl, expand, type Level } from '../lib/links';
   import { code } from '../lib/schedule';
-  import { addLink, deleteLink, editLink } from '../lib/actions';
+  import { addLink, deleteLink, editLink, markSource } from '../lib/actions';
   import { copy, toast, undoable, errorText } from '../lib/ui.svelte';
   import { now } from '../lib/db';
   import { live } from '../lib/live.svelte';
@@ -32,8 +32,8 @@
   let editLabel = $state('');
   let showBroken = $state(false);
 
-  const working = $derived(resolved.filter((r) => !r.link.broken));
-  const broken = $derived(resolved.filter((r) => r.link.broken));
+  const working = $derived(resolved.filter((r) => !r.broken));
+  const broken = $derived(resolved.filter((r) => r.broken));
   const suggestion = $derived(isEpisode && scope === 'episode' ? suggestPattern(url.trim(), season!, episode!) : null);
 
   const levelText: Record<Level, string> = { episode: 'this episode', season: 'this season', show: 'whole series', title: '' };
@@ -63,7 +63,7 @@
 
   async function saveEdit(l: Link) {
     try {
-      await editLink(l.id, { url: editUrl, label: editLabel.trim() || undefined, broken: false });
+      await editLink(l.id, { url: editUrl, label: editLabel.trim() || undefined, broken: false, failedEpisodes: undefined });
       editing = null;
     } catch (e) {
       toast(errorText(e), 'error');
@@ -71,7 +71,12 @@
   }
 
   async function markBroken(l: Link, on: boolean) {
-    await editLink(l.id, { broken: on });
+    try {
+      await markSource(l.id, on, season, episode);
+    } catch (e) {
+      toast(errorText(e), 'error');
+      return;
+    }
     if (on) {
       const next = working.find((r) => r.link.id !== l.id);
       toast(next ? `Marked broken. Next: ${next.link.label || hostOf(next.url)}` : 'Marked broken. Add another source.', 'ok', next ? { label: `Open ${next.link.label || hostOf(next.url)}`, run: () => open(next) } : undefined);
@@ -161,7 +166,7 @@
 </section>
 
 {#snippet row(r: (typeof resolved)[number])}
-  <li class:dim={r.link.broken}>
+  <li class:dim={r.broken}>
     {#if editing === r.link.id}
       <form class="edit" onsubmit={(e) => { e.preventDefault(); saveEdit(r.link); }}>
         <input type="text" inputmode="url" autocapitalize="off" spellcheck="false" bind:value={editUrl} aria-label="Link" />
@@ -173,7 +178,7 @@
       </form>
     {:else}
       <div class="main">
-        <button class="open" onclick={() => open(r)} disabled={!!r.link.broken} title={target(r)}>
+        <button class="open" onclick={() => open(r)} disabled={!!r.broken} title={target(r)}>
           <span class="host">{r.link.label || hostOf(r.url)}</span>
           {#if r.link.label}<span class="muted small">{hostOf(r.url)}</span>{/if}
           {#if isEpisode && r.level !== 'episode'}<span class="chip">{levelText[r.level]}</span>{/if}
@@ -182,10 +187,10 @@
         </button>
         <div class="row tools">
           <button class="small ghost" onclick={() => copy(target(r))} aria-label="Copy link to {r.link.label || hostOf(r.url)}">Copy</button>
-          {#if r.link.broken}
+          {#if r.broken}
             <button class="small ghost" onclick={() => markBroken(r.link, false)}>Works again</button>
           {:else}
-            <button class="small ghost" onclick={() => markBroken(r.link, true)} aria-label="{r.link.label || hostOf(r.url)} does not work">Doesn't work</button>
+            <button class="small ghost" onclick={() => markBroken(r.link, true)} aria-label="{r.link.label || hostOf(r.url)} does not work">{isEpisode && r.level !== 'episode' ? 'Fails for this episode' : "Doesn't work"}</button>
           {/if}
           <button class="small ghost" onclick={() => { editing = r.link.id; editUrl = r.link.url; editLabel = r.link.label ?? ''; }}>Edit</button>
           <button class="small ghost danger" onclick={() => remove(r.link)} aria-label="Remove {r.link.label || hostOf(r.url)}">✕</button>

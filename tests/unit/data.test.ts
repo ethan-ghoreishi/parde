@@ -146,7 +146,7 @@ describe('backup integrity', () => {
       { titles: [T('wd:Q1')], links: [{ id: 'l', titleId: 'wd:Q1', url: 'https://a.org/', addedAt: '2026-01-01', episode: 2 }] },
     ]) expect(problems(bad), JSON.stringify(bad)).toHaveLength(1);
   });
-  it('merging an older backup never brings back episodes TVmaze replaced; its marks move to the current ones', async () => {
+  it('merging an older backup keeps uncertain episode IDs and their marks without transferring them', async () => {
     await db.titles.add(T('tvm:7', { kind: 'show', status: 'watching', showStatus: 'Running', updatedAt: '2026-05-01' }));
     await db.episodes.bulkAdd([E(201, 1, { titleId: 'tvm:7' }), E(202, 2, { titleId: 'tvm:7' })]);
     const old = parseBackup(file({
@@ -156,8 +156,9 @@ describe('backup integrity', () => {
     }));
     if (!old.ok) throw new Error(old.error);
     await restore(old.backup, 'merge');
-    expect((await db.episodes.toCollection().primaryKeys()).sort()).toEqual([201, 202]);
-    expect(await db.seen.get(201)).toMatchObject({ seenAt: '2026-01-01' });
+    expect(await db.episodes.get(101)).toMatchObject({ missingSince: expect.any(String) });
+    expect(await db.seen.get(101)).toMatchObject({ seenAt: '2026-01-01' });
+    expect(await db.seen.get(201)).toBeUndefined();
   });
 });
 
@@ -203,7 +204,7 @@ describe('series progress', () => {
     expect(await seenIds()).toEqual([3]);
     await setProgress('tvm:1', null);
     expect(await seenIds()).toEqual([]);
-    expect(await status()).toBe('watching'); // "we are starting it" stays in progress
+    expect(await status()).toBe('watching');
   });
   it('"up to here" keeps the dates of marks you already had', async () => {
     await db.seen.put({ episodeId: 1, titleId: 'tvm:1', seenAt: '2021-05-05T00:00:00Z' });
@@ -231,10 +232,10 @@ describe('series progress', () => {
 
 describe('skipped episodes', () => {
   beforeEach(async () => {
-    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', followed: true, status: 'watching' }));
+    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', endedOn: '2020-01-01', followed: true, status: 'watching' }));
     await db.episodes.bulkAdd([E(1, 1), E(2, 2), E(3, 3), E(4, 4)]);
   });
-  it('an unmarked episode in the middle neither holds the show back nor stops it finishing', async () => {
+  it('an unmarked earlier episode does not block Up next and completion waits for it', async () => {
     await db.seen.bulkPut([1, 3].map((episodeId) => ({ episodeId, titleId: 'tvm:1', seenAt: 'x' })));
     const { progress } = await import('../../src/lib/schedule');
     const p = progress(await db.episodes.toArray(), new Set([1, 3]));
@@ -242,14 +243,14 @@ describe('skipped episodes', () => {
     expect(p.skipped).toBe(1);
     expect(p.unseenAired).toBe(1);
     await setSeen(E(4, 4), true);
-    const t = await db.titles.get('tvm:1');
-    expect(t?.status).toBe('watched');
-    expect(t?.followed).toBe(true); // nothing left to show, but if it ever comes back you will know
+    expect((await db.titles.get('tvm:1'))?.status).toBe('watching');
+    await setSeen(E(2, 2), true);
+    expect((await db.titles.get('tvm:1'))?.status).toBe('watched');
   });
 });
 
 describe('episode refresh', () => {
-  it('carries a seen mark across when TVmaze re-creates an episode under a new id', async () => {
+  it('keeps the original mark when TVmaze gives the slot a new ID', async () => {
     await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
     await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
     await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
@@ -261,9 +262,9 @@ describe('episode refresh', () => {
     } finally {
       vi.unstubAllGlobals();
     }
-    expect(await db.episodes.get(70)).toBeUndefined();
-    expect(await db.seen.get(80)).toMatchObject({ titleId: 'tvm:7' });
-    expect(await db.seen.get(70)).toBeUndefined(); // no orphan left behind
+    expect(await db.episodes.get(70)).toMatchObject({ missingSince: expect.any(String) });
+    expect(await db.seen.get(80)).toBeUndefined();
+    expect(await db.seen.get(70)).toMatchObject({ titleId: 'tvm:7' });
   });
 
   const show = (eps: unknown[] | undefined, imdb: string | null = null) => ({
@@ -282,8 +283,8 @@ describe('episode refresh', () => {
     await db.titles.add(T('tvm:7', { kind: 'show', tvmaze: 7, status: 'watching', enrichedAt: new Date().toISOString() }));
     await db.episodes.bulkAdd([E(70, 1, { titleId: 'tvm:7' }), E(71, 2, { titleId: 'tvm:7' })]);
     await setSeen(E(70, 1, { titleId: 'tvm:7' }), true);
-    await refreshWith(show([]));
-    await refreshWith(show(undefined));
+    await expect(refreshWith(show([]))).rejects.toThrow(/empty schedule/);
+    await expect(refreshWith(show(undefined))).rejects.toThrow(/incomplete/);
     expect(await db.episodes.where('titleId').equals('tvm:7').count()).toBe(2);
     expect(await db.seen.get(70)).toBeTruthy();
   });
@@ -303,7 +304,7 @@ describe('episode refresh', () => {
 
 describe('episodes', () => {
   beforeEach(async () => {
-    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', followed: true }));
+    await db.titles.add(T('tvm:1', { kind: 'show', showStatus: 'Ended', endedOn: '2020-01-01', followed: true }));
     await db.episodes.bulkAdd([E(1, 1), E(2, 2), E(3, 3)]);
   });
   it('starting a show moves it to watching; finishing an ended one marks it watched', async () => {
@@ -345,6 +346,7 @@ describe('links', () => {
     await expect(addLink('wd:Q1', 'javascript:alert(1)')).rejects.toThrow();
   });
   it('moves a domain across all links and clears broken marks', async () => {
+    await db.titles.bulkAdd(['wd:Q1', 'wd:Q2', 'wd:Q3'].map((id) => T(id)));
     await addLink('wd:Q1', 'https://old.to/a');
     const l = await addLink('wd:Q2', 'https://www.old.to/{s}/{e}');
     await db.links.update(l.id, { broken: true });

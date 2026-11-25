@@ -182,20 +182,16 @@ export interface Gap {
   ref: string;
 }
 
-/** An expectation recorded after the viewing is hindsight, not a prediction. */
-export const beforeWatching = (t: Title) => !(t.expectedAt && t.finishedAt && t.expectedAt.slice(0, 10) > t.finishedAt.slice(0, 10));
+/** Require a pre-watch entry from a version that actually enforced it. A same-day diary date is ambiguous. */
+export const beforeWatching = (t: Title) => !!(t.instinctRecorded && t.expectedAt && t.firstWatchedAt && t.expectedAt < t.firstWatchedAt);
 
-/**
- * Whether you said how keen you were before Parde had shown you its scores: undefined when that was not yet
- * recorded (edit times begin with the version that started keeping scores closed).
- */
-export const blindExpectation = (t: Title) => (t.edited?.expectation && t.expectedAt ? !t.scoresAt || t.scoresAt > t.expectedAt : undefined);
+export const blindExpectation = (t: Title) => t.instinctRecorded && t.expectedAt ? !t.scoresAt || t.scoresAt > t.expectedAt : undefined;
 
 /** Expectation 1–5 against enjoyment 1–10, in plain counts against your own average. */
 export function trailerInstinct(titles: Title[]) {
   const pairs = titles.filter((t) => t.expectation && t.rating !== undefined && beforeWatching(t));
   const avg = mean(rated(titles).map((t) => t.rating!));
-  const gap = (t: Title) => (t.rating! - 1) * (100 / 9) - (t.expectation! - 1) * 25;
+  const gap = (t: Title) => t.rating! - avg;
   const list = (ts: Title[]): Gap[] => ts.slice(0, 5).map((title) => ({ title, ref: EXPECTATIONS[title.expectation!] }));
   const keen = pairs.filter((t) => t.expectation! >= 4);
   const unsure = pairs.filter((t) => t.expectation! <= 2);
@@ -206,8 +202,8 @@ export function trailerInstinct(titles: Title[]) {
     unsure: { n: unsure.length, above: unsure.filter((t) => t.rating! > avg).length },
     blind: pairs.filter((t) => blindExpectation(t)).length,
     aware: pairs.filter((t) => blindExpectation(t) === false).length,
-    surprises: list(pairs.filter((t) => gap(t) >= 25).sort((a, b) => gap(b) - gap(a))),
-    letdowns: list(pairs.filter((t) => gap(t) <= -25).sort((a, b) => gap(a) - gap(b))),
+    surprises: list(pairs.filter((t) => t.expectation! <= 2 && gap(t) >= 0.5).sort((a, b) => gap(b) - gap(a))),
+    letdowns: list(pairs.filter((t) => t.expectation! >= 4 && gap(t) <= -0.5).sort((a, b) => gap(a) - gap(b))),
   };
 }
 
@@ -267,12 +263,51 @@ export function scoreBands(titles: Title[], dismissed: Dismissed[]): Band[] {
   };
   for (const t of titles) {
     if (t.rating !== undefined) band(tomatometer(t.critics))?.ratings.push(t.rating);
-    if (t.chosenAt) choose(tomatometer(t.critics), true, t.chosenAt, t.scoresAt);
+    if (t.chosenAt) choose(tomatometer(t.choiceScores), true, t.chosenAt, t.scoresAt);
   }
   // A title you passed over and then added anyway was wanted in the end: counted there, not twice.
   const wanted = new Set(titles.map((t) => t.qid));
-  for (const d of dismissed) if (d.name && !wanted.has(d.qid)) choose(tomatometer(d.critics), false, d.at, d.scoresAt);
+  for (const d of dismissed) if (d.measured && !wanted.has(d.qid)) choose(tomatometer(d.critics), false, d.at, d.scoresAt);
   return bands.map(({ min: _, ...b }) => b);
+}
+
+const ruleNames = [
+  'Critics and audience both under 60%',
+  'Critics under 60% and audience at least 70%',
+  'Critics over 80% and audience under 70%',
+  'IMDb 5.5–6.5',
+  'IMDb over 7.5 and critics over 80%',
+];
+
+/** Find real cases to inspect. The two scores in a pair must have been reported within a year. */
+export function scoreCases(titles: Title[], dismissed: Dismissed[]) {
+  const cases = ruleNames.map((label) => ({ label, liked: [] as Title[], chosen: { yes: 0, n: 0 } }));
+  const eligible = (scores: CriticScore[]) => {
+    const critic = scores.find((c) => c.source === 'Rotten Tomatoes');
+    const audience = scores.find((c) => c.source === 'Rotten Tomatoes audience');
+    const imdb = scores.find((c) => c.source === 'IMDb');
+    const paired = (other?: CriticScore) => critic?.asOf && other?.asOf &&
+      Math.abs(Date.parse(critic.asOf) - Date.parse(other.asOf)) <= 366 * 864e5;
+    const high = critic && critic.score > 80;
+    return [
+      critic && critic.score < 60 && paired(audience) && audience!.score < 60,
+      critic && critic.score < 60 && paired(audience) && audience!.score >= 70,
+      high && paired(audience) && audience!.score < 70,
+      imdb && imdb.score >= 55 && imdb.score <= 65,
+      high && paired(imdb) && imdb!.score > 75,
+    ];
+  };
+  for (const t of rated(titles)) eligible(t.critics).forEach((fits, i) => { if (fits) cases[i].liked.push(t); });
+  const count = (scores: CriticScore[], yes: boolean) => eligible(scores).forEach((fits, i) => {
+    if (fits) {
+      cases[i].chosen.n++;
+      if (yes) cases[i].chosen.yes++;
+    }
+  });
+  for (const t of titles) if (t.choiceScores && t.chosenAt) count(t.choiceScores, true);
+  const have = new Set(titles.map((t) => t.qid));
+  for (const d of dismissed) if (d.measured && !have.has(d.qid)) count(d.critics ?? [], false);
+  return cases;
 }
 
 /** Whether two groups of your ratings differ by more than chance. Under five in either, there is nothing to say. */

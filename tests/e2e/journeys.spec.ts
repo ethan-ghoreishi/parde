@@ -122,7 +122,7 @@ test('want a film, record trailer keenness, log a watch with partner rating', as
   await expect(page.getByText(/together/)).toBeVisible();
   await expect(page.getByText('Sara', { exact: true })).toBeVisible();
   // Hindsight cannot change the expectation any more
-  await expect(page.getByText(/Before watching you were keen/)).toBeVisible();
+  await expect(page.getByText(/Recorded keenness: keen/)).toBeVisible();
 
   // Themes in a tap, then a review prompt built only from what was said
   await page.getByRole('group', { name: 'Themes' }).getByRole('button', { name: 'memory' }).click();
@@ -250,6 +250,13 @@ test('follow a series: pattern source, resume from Tonight, broken-link fallback
   await second.close();
   await expect(card.getByRole('button', { name: /Watch on site-b\.org/ })).toBeVisible();
 
+  // Moving to the next episode leaves the reusable source available there.
+  await card.getByRole('button', { name: 'Severance S01E02 seen', exact: true }).click();
+  await expect(card).toContainText('S01E03');
+  await expect(card.getByRole('button', { name: 'Sources for Severance S01E03' })).toHaveText('Sources (2)');
+  await page.locator('.toast').getByRole('button', { name: 'Undo' }).click();
+  await expect(card).toContainText('S01E02');
+
   // Every source for this exact episode, without leaving Tonight
   await card.getByRole('button', { name: 'Sources for Severance S01E02' }).click();
   const sheet = page.getByRole('dialog', { name: 'Severance S01E02' });
@@ -317,7 +324,7 @@ const stored = (page: Page, store: string, key: string) =>
 
 test('discover: rating is saying you have seen it; scores stay closed, and opening them first is remembered', async ({ page }) => {
   await page.getByRole('link', { name: 'Start with what you have seen' }).click();
-  await expect(page.getByRole('heading', { name: 'Seen by almost everyone' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /Remember what you.ve seen/ })).toBeVisible();
   await expect(page.locator('.tile')).toHaveCount(12);
   // Two taps: the poster, then the rating
   await page.locator('.tile').first().click();
@@ -358,26 +365,61 @@ test('discover: rating is saying you have seen it; scores stay closed, and openi
   await panel.getByRole('button', { name: 'Undo' }).click();
   await expect(panel.getByRole('button', { name: 'Want to watch' })).toBeVisible();
 
-  // A series: marked as all seen, with one step to say otherwise
+  // A partially watched series can be placed without ever marking later episodes
   await page.locator('.tile', { hasText: 'Severance' }).click();
-  await panel.getByRole('button', { name: '8', exact: true }).click();
-  await expect(panel.getByLabel(/Only some\? Up to/)).toHaveValue(/^\d+$/);
-  await panel.getByLabel(/Only some\? Up to/).selectOption({ label: 'S01E09 · end of season 1' });
-  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+  await panel.getByRole('button', { name: 'Seen some' }).click();
+  await expect(panel.getByLabel('Seen up to')).toHaveValue('none');
+  await panel.getByLabel('Seen up to').selectOption({ label: 'S01E09 · end of season 1' });
+  await expect(page.getByText('This shelf: 1 in progress, 2 on your list.')).toBeVisible();
 
   // Opening a title and coming back finds the shelf as it was
   await panel.getByRole('link', { name: 'Open' }).click();
   await expect(page.getByRole('heading', { name: 'Severance', level: 1 })).toBeVisible();
   await expect(page.locator('.next-ep')).toContainText('S02E01');
   await page.goBack();
-  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+  await expect(page.getByText('This shelf: 1 in progress, 2 on your list.')).toBeVisible();
   // The same by the tab bar: an installed app has no Back button
   await page.locator('.tile', { hasText: 'Heat' }).click();
   await panel.getByRole('link', { name: 'Open' }).click();
   await expect(page.getByRole('heading', { name: 'Heat', level: 1 })).toBeVisible();
   await page.getByRole('link', { name: 'Discover', exact: true }).first().click();
   await expect(page.getByRole('heading', { name: 'Like Collateral' })).toBeVisible();
-  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+  await expect(page.getByText('This shelf: 1 in progress, 2 on your list.')).toBeVisible();
+});
+
+test('a passed title can be reconsidered and saved without leaving a live dismissal', async ({ page }) => {
+  await page.goto('./#/discover?from=title:Q42&name=Collateral');
+  const tile = page.locator('.tile', { hasText: 'Heat' });
+  const panel = page.locator('.panel');
+  await tile.click();
+  await panel.getByRole('button', { name: 'Not for me' }).click();
+  await page.getByRole('link', { name: 'Second look' }).click();
+  await expect(page.getByRole('heading', { name: 'Second look' })).toBeVisible();
+  await tile.click();
+  await panel.getByRole('button', { name: 'Want to watch' }).click();
+  await expect(panel).toContainText('On your list.');
+  expect(await stored(page, 'dismissed', 'Q42198')).toBeUndefined();
+  expect(await stored(page, 'removed', 'dismissed:Q42198')).toBeTruthy();
+});
+
+test('Next shelf advances during delayed details and Back restores the page without repeating titles', async ({ page }) => {
+  await page.route(/www\.wikidata\.org\/w\/api\.php/, async (r) => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await r.fallback();
+  });
+  await page.goto('./#/discover?from=decade:1990');
+  const tiles = page.locator('.shelf .tile');
+  await expect(tiles).toHaveCount(12);
+  const first = await tiles.evaluateAll((rows) => rows.map((row) => row.id));
+  await page.getByRole('button', { name: 'Next shelf', exact: true }).first().click();
+  const second = await tiles.evaluateAll((rows) => rows.map((row) => row.id));
+  expect(second).toHaveLength(12);
+  expect(second.filter((id) => first.includes(id))).toEqual([]);
+  await page.getByRole('link', { name: 'Your taste' }).click();
+  await expect(page.getByRole('heading', { name: 'Your taste' })).toBeVisible();
+  await page.goBack();
+  await expect(tiles.first()).toHaveAttribute('id', second[0]);
+  await expect(page.getByRole('heading', { name: 'The 1990s' })).toBeVisible();
 });
 
 test('a write that fails is never reported as done', async ({ page }) => {
@@ -390,7 +432,7 @@ test('a write that fails is never reported as done', async ({ page }) => {
     };
   });
   await page.getByRole('group', { name: 'Your rating' }).getByRole('button', { name: '9', exact: true }).click();
-  await expect(page.locator('.toast').first()).toContainText('Not saved');
+  await expect(page.locator('.toast').first()).toContainText('Could not save');
   await expect(page.getByRole('group', { name: 'Your rating' }).getByRole('button', { name: '9', exact: true })).toHaveAttribute('aria-pressed', 'false');
   await page.getByRole('textbox', { name: 'Your notes' }).fill('lost?');
   await expect(page.locator('.toast').first()).toContainText('Your note is not saved');

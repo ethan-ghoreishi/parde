@@ -1,7 +1,7 @@
 import { db, type Episode, type Kind, type Title } from './db';
 import { FILM_TYPES, SHOW_TYPES, lit, rankHits, searchFilms, sparql as query, splitYear } from './api/wiki';
 import { searchShows, showForImdb, findShow } from './api/tvmaze';
-import { addFilms, addShow, update, seenAllAired, setProgress } from './actions';
+import { addFilms, storeShow, update, setProgress } from './actions';
 import { byOrder, code, isAired, progress as whereIn } from './schedule';
 import { errorText } from './ui.svelte';
 
@@ -277,7 +277,7 @@ export function choose(row: Row, cands: (Match & { links?: number })[]): { candi
   const near = row.year ? list.filter((c) => c.year && Math.abs(c.year - row.year!) <= 1) : [];
   // Most-linked first stands in for "the one people mean" when nothing else decides.
   const ordered = [...exactYear, ...near.filter((c) => !exactYear.includes(c)), ...[...list].filter((c) => !near.includes(c)).sort((a, b) => (b.links ?? 0) - (a.links ?? 0))];
-  const sure = !wrongKind && (exactYear.length === 1 || (near.length === 1 && !exactYear.length) || (!row.year && list.length === 1));
+  const sure = !wrongKind && (row.year ? exactYear.length === 1 : list.length === 1);
   return { candidates: ordered.slice(0, 5).map(({ links: _links, ...m }) => m), pick: sure ? 0 : -1, sure, wrongKind };
 }
 
@@ -309,15 +309,26 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
   const tick = (n = 1) => progress((done += n), rows.length);
 
   const imdbRows = items.filter((it) => it.row.imdb);
-  const fromImdb = imdbRows.length ? await byImdb([...new Set(imdbRows.map((it) => it.row.imdb!))]) : new Map<string, (Match & { typed: boolean })[]>();
+  const ids = [...new Set(imdbRows.map((it) => it.row.imdb!))];
+  const fromImdb = new Map<string, (Match & { typed: boolean })[]>();
+  const unavailable = new Set<string>();
+  for (let i = 0; i < ids.length; i += 150) {
+    const batch = ids.slice(i, i + 150);
+    try {
+      for (const [id, matches] of await byImdb(batch)) fromImdb.set(id, matches);
+    } catch {
+      batch.forEach((id) => unavailable.add(id));
+    }
+  }
   for (const it of imdbRows) {
     const found = fromImdb.get(it.row.imdb!) ?? [];
+    const unchecked = unavailable.has(it.row.imdb!);
     const [m] = found;
     // The id is exact, but not always the type: what the file calls a film, Wikidata may call a series.
     const agrees = !m || (m.typed ? !it.row.kind || it.row.kind === m.kind : !!it.row.kind);
     const kind = m?.typed ? m.kind : (it.row.kind ?? m?.kind);
     try {
-      if (kind === 'show' && !m?.tvmaze) {
+      if ((kind === 'show' || unchecked && !kind && it.row.kind !== 'film') && !m?.tvmaze && found.length <= 1) {
         // TVmaze allows 20 requests per 10 seconds.
         const tvmaze = await showForImdb(it.row.imdb!);
         await sleep(550);
@@ -326,8 +337,9 @@ export async function resolve(rows: Row[], progress: (done: number, total: numbe
     } catch (e) {
       it.error = errorText(e);
     }
-    if (it.candidates.length === 1 && agrees) Object.assign(it, { pick: 0, sure: true });
-    if (it.candidates.length || it.error) tick();
+    if (it.candidates.length === 1 && agrees && found.length <= 1) Object.assign(it, { pick: 0, sure: true });
+    if (!it.candidates.length && !it.error) it.error = unchecked ? 'IMDb ID could not be checked. Try again.' : 'No verified match for this IMDb ID';
+    tick();
   }
 
   const named = items.filter((it) => !it.candidates.length && !it.error && it.row.name);
@@ -393,9 +405,9 @@ export interface Outcome {
  */
 export function patchFor(row: Row, existing?: Title): Partial<Title> {
   const p: Partial<Title> = {};
-  if (row.rating && existing?.rating === undefined) p.rating = row.rating;
-  const upgrade = existing?.kind === 'film' && existing.status === 'want' && row.status === 'watched';
-  if (!existing || upgrade) {
+  if (row.rating && existing?.rating === undefined && !existing?.edited?.rating) p.rating = row.rating;
+  const upgrade = existing?.kind === 'film' && existing.status === 'want' && !existing.firstWatchedAt && (!existing.edited?.status || existing.edited.status === existing.addedAt) && row.status === 'watched';
+  if (!existing || (upgrade && !existing?.edited?.finishedAt)) {
     p.status = row.status;
     if (row.status === 'watched' && row.watchedOn && !existing?.finishedAt) p.finishedAt = row.watchedOn;
   }
@@ -447,9 +459,9 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
   let done = 0;
   const tick = (n = 1) => progress((done += n), chosen.length);
 
-  async function fill(id: string, row: Row) {
+  const fill = (id: string, row: Row) => db.transaction('rw', db.titles, db.episodes, db.seen, db.removed, async () => {
     const t = await db.titles.get(id);
-    if (!t) return;
+    if (!t) throw new Error('This title was removed while importing.');
     const p = patchFor(row, t);
     if (Object.keys(p).length) {
       await update(t.id, p);
@@ -459,12 +471,12 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
     const eps = await db.episodes.where('titleId').equals(id).toArray();
     const here = whereIn(eps, new Set(await db.seen.where('titleId').equals(id).primaryKeys())).lastSeen;
     const at = episodeAt(eps, row);
-    if (!here && at) {
+    if (!here && at && !t.firstWatchedAt && t.status === 'want' && !(await db.removed.where('key').startsWith('seen:').and((x) => eps.some((e) => x.key === `seen:${e.id}`)).count())) {
       await setProgress(id, at);
       out.updated++;
     } else if (!here && t.status === 'want') out.toPlace.push(id);
     else if (here && at && byOrder(at, here) > 0) out.ahead.push({ id, name: t.name, here: code(here), ep: at });
-  }
+  });
 
   const owned = chosen.flatMap((x) => {
     const id = ownedId(x.m, library);
@@ -488,8 +500,12 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
       out.added.push(...added);
       for (const { row, m } of batch) {
         if (added.includes(`wd:${m.qid}`)) continue;
-        if (await db.titles.get(`wd:${m.qid}`)) await fill(`wd:${m.qid}`, row); // added meanwhile
-        else out.failed.push({ row, error: 'No longer on Wikidata' });
+        try {
+          if (await db.titles.get(`wd:${m.qid}`)) await fill(`wd:${m.qid}`, row);
+          else out.failed.push({ row, error: 'No matching film metadata returned by Wikidata' });
+        } catch (e) {
+          out.failed.push({ row, error: errorText(e) });
+        }
       }
     } catch (e) {
       out.failed.push(...batch.map(({ row }) => ({ row, error: errorText(e) })));
@@ -499,20 +515,17 @@ export async function commit(items: Item[], plans: Record<number, ShowPlan>, pro
 
   for (const { row, m, partly } of fresh.filter((x) => x.m.kind === 'show')) {
     try {
-      const tvm = m.tvmaze ?? (await findShow(m.name, m.year));
+      const tvm = m.tvmaze ?? (row.imdb ? await showForImdb(row.imdb) : await findShow(m.name, m.year));
       if (!tvm) throw new Error('Not on TVmaze, so its episodes cannot be tracked');
-      const id = `tvm:${tvm}`;
-      if (await db.titles.get(id)) {
-        await fill(id, row); // found by name, but already in the library
-      } else {
-        await addShow(tvm, patchFor(row));
-        out.added.push(id);
-        const at = episodeAt(await db.episodes.where('titleId').equals(id).toArray(), row);
-        if (at) await setProgress(id, at);
-        else if (row.upTo || (row.status === 'watched' && partly)) {
-          await update(id, { status: 'watching', finishedAt: undefined });
-          out.toPlace.push(id);
-        } else if (row.status === 'watched') await seenAllAired(id);
+      const p = patchFor(row);
+      const initial = row.upTo ?? (row.status === 'watched' && !partly ? 'all' : undefined);
+      const result = await storeShow(tvm, {
+        ...p, ...(m.qid ? { qid: m.qid } : {}), ...(row.status === 'watched' ? { status: 'watching', finishedAt: undefined } : {}),
+      }, initial);
+      if (!result.added) await fill(result.id, row);
+      else {
+        out.added.push(result.id);
+        if (result.needsProgress || partly) out.toPlace.push(result.id);
       }
     } catch (e) {
       out.failed.push({ row, error: errorText(e) });

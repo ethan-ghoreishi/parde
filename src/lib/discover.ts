@@ -1,4 +1,4 @@
-import type { Title } from './db';
+import type { Dismissed, Title } from './db';
 import { aboutSubject, credits, fromCountry, neighbours, type Find } from './api/wiki';
 import { countryAffinity, makerAffinity, mean, rated, type Affinity } from './taste';
 import seedRows from '../data/seed.json';
@@ -22,8 +22,10 @@ export const PLACES: Record<string, string> = {
 };
 const placeId = (name: string) => Object.entries(PLACES).find(([, n]) => n === name)?.[0];
 
+export const REVISIT: Thread = { key: 'revisit', label: 'Second look', why: 'Titles you previously passed on' };
 export const DECADES = [1960, 1970, 1980, 1990, 2000, 2010, 2020];
-export const KNOWN: Thread = { key: 'known', label: 'Seen by almost everyone', why: 'Films and series from every decade, most written-about first' };
+export const KNOWN: Thread = { key: 'known', label: 'Remember what you’ve seen', why: 'Familiar films and series to add to your library' };
+export const SERIES: Thread = { key: 'known:series', label: 'Remember a series', why: 'Familiar series to add or pick up again' };
 const decade = (d: number): Thread => ({ key: `decade:${d}`, label: `The ${d}s`, why: `Films and series that began in the ${d}s` });
 const avg1 = (a: Pick<Affinity, 'avg' | 'n'>) => `you average ${a.avg.toFixed(1)} over ${a.n}`;
 
@@ -47,6 +49,8 @@ export function threads(library: Title[]): Thread[] {
 
 /** The thread an address names, with your own reason for it when there is one. */
 export function threadOf(key: string, library: Title[], name = ''): Thread | undefined {
+  if (key === REVISIT.key) return REVISIT;
+  if (key === SERIES.key) return SERIES;
   const mine = threads(library).find((t) => t.key === key);
   if (mine) return mine;
   const [kind, ref] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
@@ -72,6 +76,16 @@ export function offer(all: Thread[], turn: number): Thread[] {
 type Row = [qid: number, name: string, year: number, tvmaze: number, wiki?: string];
 const seeds: Find[] = (seedRows as unknown as Row[]).map(([q, name, year, tvmaze, wiki]) => ({ qid: `Q${q}`, name, year, kind: tvmaze ? 'show' : 'film', tvmaze: tvmaze || undefined, wiki: wiki ?? name }));
 
+const seedById = new Map(seeds.map((f) => [f.qid, f]));
+
+export function revisitCandidates(dismissed: Dismissed[]): Find[] {
+  return dismissed.flatMap((d) => {
+    if (d.name && d.kind && d.year) return [{ qid: d.qid, name: d.name, kind: d.kind, year: d.year, tvmaze: d.tvmaze }];
+    const seed = seedById.get(d.qid);
+    return seed ? [seed] : [];
+  });
+}
+
 /** Every title on a thread, most related or best known first. */
 export async function lookUp(key: string): Promise<Find[]> {
   const ref = key.slice(key.indexOf(':') + 1);
@@ -84,30 +98,22 @@ export async function lookUp(key: string): Promise<Find[]> {
   }
   if (key.startsWith('about:')) return aboutSubject(ref);
   if (key.startsWith('place:')) return fromCountry(ref);
+  if (key === SERIES.key) return seeds.filter((s) => s.kind === 'show');
   if (key.startsWith('decade:')) return seeds.filter((s) => s.year! >= Number(ref) && s.year! < Number(ref) + 10);
   return seeds;
 }
 
 export const SHELF = 12;
 
-/**
- * Twelve to look at: eight you may well know and four from further down the thread. Nothing already decided, and
- * what you were shown lately only when there is nothing else.
- */
-export function shelf(all: Find[], library: Title[], dismissed: Set<string>, shown: Set<string>, year = new Date().getFullYear()): Find[] {
-  const have = new Set(library.flatMap((t) => [t.qid, t.tvmaze && `tvm:${t.tvmaze}`].filter(Boolean)));
-  const open = all.filter((f) => f.year && f.year <= year && !have.has(f.qid) && !have.has(`tvm:${f.tvmaze}`) && !dismissed.has(f.qid));
-  const fresh = open.filter((f) => !shown.has(f.qid));
-  const list = fresh.length >= 4 ? fresh : [...fresh, ...open.filter((f) => shown.has(f.qid))];
-  const near = list.slice(0, 8);
+/** Browse every eligible candidate once per thread, with familiar titles first on the collection shelf. */
+export function shelf(all: Find[], library: Title[], dismissed: Set<string>, shown: Set<string>, year = new Date().getFullYear(), mix = true): Find[] {
+  const have = new Set(library.flatMap((t) => [t.qid ?? t.id.replace(/^wd:/, ''), t.tvmaze ? `tvm:${t.tvmaze}` : t.id]));
+  const list = [...new Map(all.map((f) => [f.tvmaze ? `tvm:${f.tvmaze}` : f.qid, f])).values()]
+    .filter((f) => f.year && f.year <= year && !have.has(f.qid) && !have.has(`tvm:${f.tvmaze}`) && !dismissed.has(f.qid) && !shown.has(f.qid));
+  if (!mix || list.length <= SHELF) return list.slice(0, SHELF);
   const rest = list.slice(8);
-  const step = Math.max(1, Math.floor(rest.length / 4));
-  const far = rest.length <= 4 ? rest : [0, 1, 2, 3].map((i) => rest[i * step]);
-  return [...near, ...far].slice(0, SHELF);
+  return [...list.slice(0, 8), ...[0, 1, 2, 3].map((i) => rest[Math.floor(i * rest.length / 4)])];
 }
-
-/** Remember the latest few hundred shown, so shelves keep turning up new things. */
-export const remember = (shown: string[], more: string[]) => [...new Set([...more, ...shown])].slice(0, 600);
 
 // ---------- What a choice just told you ----------
 

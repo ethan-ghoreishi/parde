@@ -2,7 +2,7 @@
   import { ui, toast, errorText } from '../lib/ui.svelte';
   import { searchFilms, type FilmHit, type PersonHit } from '../lib/api/wiki';
   import { searchShows, type ShowHit } from '../lib/api/tvmaze';
-  import { addFilm, addShow, update, setExpectation, seenAllAired } from '../lib/actions';
+  import { addFilm, addShow, update, setExpectation } from '../lib/actions';
   import { db, type Status } from '../lib/db';
   import { live } from '../lib/live.svelte';
   import { titleHref, personHref, go } from '../lib/router.svelte';
@@ -80,8 +80,7 @@
     busy[key] = true;
     try {
       // "Seen all" of a running show means caught up: marking its episodes leaves it in progress for the next season.
-      const id = kind === 'film' ? await addFilm(key as string, { status }) : await addShow(key as number, status === 'watching' ? { status } : {});
-      if (kind === 'show' && status === 'watched') await seenAllAired(id);
+      const id = kind === 'film' ? await addFilm(key as string, { status }) : await addShow(key as number, { status: status === 'watched' ? 'watching' : status }, status === 'watched' ? 'all' : undefined);
       added[id] = status;
     } catch (e) {
       toast(errorText(e), 'error');
