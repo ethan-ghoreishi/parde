@@ -17,10 +17,23 @@ addEventListener('scroll', () => {
   saving = setTimeout(() => history.replaceState({ y: scrollY }, ''), 200);
 }, { passive: true });
 
-function scrollBack(y: number, tries = 40) {
-  // Pages fill in from storage a moment after they appear.
-  if (y && tries && document.documentElement.scrollHeight < y + innerHeight) requestAnimationFrame(() => scrollBack(y, tries - 1));
-  else scrollTo(0, y);
+let letGo = () => {};
+/** Pages fill in from storage over several steps, above the place too: hold it until they settle, or you move. */
+function scrollBack(y: number) {
+  letGo();
+  scrollTo(0, y);
+  if (!y) return;
+  const grows = new ResizeObserver(() => scrollTo(0, y));
+  grows.observe(document.body);
+  const moves = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+  const timer = setTimeout(() => letGo(), 1000);
+  letGo = () => {
+    clearTimeout(timer);
+    grows.disconnect();
+    for (const m of moves) removeEventListener(m, letGo);
+    letGo = () => {};
+  };
+  for (const m of moves) addEventListener(m, letGo, { passive: true });
 }
 
 // A reload stays where it was, too.

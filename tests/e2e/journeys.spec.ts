@@ -421,7 +421,7 @@ test('import asks what it cannot know: the scale, the title, and where you are',
   expect(await stored(page, 'titles', 'wd:Q42198')).toMatchObject({ rating: 5 });
 });
 
-test('finding your way: page titles, focus and the way back', async ({ page }) => {
+test('finding your way: page titles, focus and the way back', async ({ page, browserName }) => {
   await search(page, 'severance');
   await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Watching' }).click();
   await page.locator('li.hit', { hasText: 'Severance' }).getByRole('button', { name: 'Open' }).click();
@@ -434,8 +434,12 @@ test('finding your way: page titles, focus and the way back', async ({ page }) =
   expect(y).toBeGreaterThan(300);
   await page.goto('./#/library');
   await expect(page).toHaveTitle('Library · Parde');
+  // A slow phone: the page fills in over several steps, above where you were too.
+  if (browserName === 'chromium') await (await page.context().newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: 20 });
   await page.goBack();
-  await expect.poll(() => page.evaluate(() => Math.abs(scrollY))).toBe(y);
+  await page.locator('.season-head').first().waitFor();
+  await page.waitForTimeout(1500);
+  expect(await page.evaluate(() => scrollY)).toBe(y);
 });
 
 test('layout: no horizontal scroll; the page scrolls, the tab bar stays on the bottom edge and never covers the end of a page', async ({ page, isMobile }) => {
