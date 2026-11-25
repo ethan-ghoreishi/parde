@@ -58,6 +58,9 @@ export function scoreText(c: CriticScore): string {
   }
 }
 
+/** The scores as they stood at the choice; earlier versions saved a title with them and kept no separate copy. */
+const atChoice = (t: Title) => t.choiceScores ?? t.critics;
+
 export const tomatometer = (critics: CriticScore[] | undefined) => critics?.find((c) => c.source === 'Rotten Tomatoes')?.score;
 
 export const rated = (titles: Title[]) => titles.filter((t) => t.rating !== undefined);
@@ -276,7 +279,7 @@ export function scoreBands(titles: Title[], dismissed: Dismissed[]): Band[] {
   };
   for (const t of titles) {
     if (t.rating !== undefined) band(tomatometer(t.critics))?.ratings.push(t.rating);
-    if (t.chosenAt) choose(tomatometer(t.choiceScores), true, t.chosenAt, t.scoresAt);
+    if (t.chosenAt) choose(tomatometer(atChoice(t)), true, t.chosenAt, t.scoresAt);
   }
   // A title you passed over and then added anyway was wanted in the end: counted there, not twice.
   const wanted = new Set(titles.map((t) => t.qid));
@@ -330,7 +333,7 @@ export function scoreRules(titles: Title[], dismissed: Dismissed[]): ScoreRule[]
     if (!scores || !at || !scoresAt || scoresAt > at) return;
     ruleFits(scores, year).forEach((fits, i) => { if (fits) (rules[i].knowing.n++, (rules[i].knowing.yes += yes ? 1 : 0)); });
   };
-  for (const t of titles) choice(t.choiceScores, t.year, true, t.chosenAt, t.scoresAt);
+  for (const t of titles) choice(atChoice(t), t.year, true, t.chosenAt, t.scoresAt);
   const wanted = new Set(titles.map((t) => t.qid));
   for (const d of dismissed) if (!wanted.has(d.qid)) choice(d.critics, d.year, false, d.at, d.scoresAt);
   return rules;

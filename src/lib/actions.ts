@@ -196,7 +196,7 @@ export async function refreshTitle(t: Title, deep = false) {
         ((cur.syncedAt ?? '') > started && (cur.tvmUpdated ?? 0) >= (meta.tvmUpdated ?? 0))) return;
       const revived = cur.status === 'watched' && cur.showStatus === 'Ended' && !!full.showStatus && full.showStatus !== 'Ended';
       await saveEpisodes(t.id, episodes);
-      await db.titles.put({ ...cur, ...filled(full), ...(cur.qid ? { qid: cur.qid } : {}), endedOn: full.endedOn, episodeOrders: full.episodeOrders, ...(revived && !cur.edited?.followed ? { followed: true } : {}), syncedAt: now(), enrichedAt: enriched ? now() : cur.enrichedAt });
+      await db.titles.put({ ...cur, ...choiceKept(cur), ...filled(full), ...(cur.qid ? { qid: cur.qid } : {}), endedOn: full.endedOn, episodeOrders: full.episodeOrders, ...(revived && !cur.edited?.followed ? { followed: true } : {}), syncedAt: now(), enrichedAt: enriched ? now() : cur.enrichedAt });
       await reconcile(t.id, false, { justEnded: cur.showStatus !== 'Ended' && full.showStatus === 'Ended' });
     });
   } else if (t.qid) {
@@ -204,6 +204,9 @@ export async function refreshTitle(t: Title, deep = false) {
     await saveFilmMeta(t.id, meta, started, t.addedAt);
   }
 }
+
+/** Saved before scores were kept with the choice: the ones it was saved with are about to be replaced, so keep them. */
+const choiceKept = (t: Title) => (t.chosenAt && !t.choiceScores ? { choiceScores: t.critics } : {});
 
 /** Merges into the stored record, so a rating made while this was loading is kept. */
 export async function saveFilmMeta(id: string, meta: Meta, started?: string, addedAt?: string) {
@@ -213,7 +216,7 @@ export async function saveFilmMeta(id: string, meta: Meta, started?: string, add
   await db.transaction('rw', db.titles, async () => {
     const t = await db.titles.get(id);
     if (!t || (addedAt && t.addedAt !== addedAt) || (t.enrichedAt && (!started || t.enrichedAt > started))) return;
-    await db.titles.update(id, { ...filled(rest), ...(named ? { name } : {}), enrichedAt: now() });
+    await db.titles.update(id, { ...filled(rest), ...choiceKept(t), ...(named ? { name } : {}), enrichedAt: now() });
   });
 }
 

@@ -100,7 +100,7 @@ describe('scores and you', () => {
         T({ status: 'want', critics: rt(91), choiceScores: rt(40), chosenAt: '2026-01-02', scoresAt: '2026-01-03' }), // opened only afterwards
         T({ status: 'want', choiceScores: rt(90), chosenAt: '2026-01-02', scoresAt: '2026-01-01' }),
         T({ rating: 8, critics: rt(45) }),
-        T({ status: 'want', critics: rt(10), chosenAt: '2026-01-02' }), // not chosen in Discover: says nothing about instinct
+        T({ status: 'want', critics: rt(10) }), // not chosen in Discover: says nothing about instinct
       ],
       [
         { qid: 'Q91', at: '2026-01-02', name: 'x', critics: rt(30), scoresAt: '2026-01-01' },
@@ -113,6 +113,10 @@ describe('scores and you', () => {
       [[], { yes: 0, n: 0 }, { yes: 0, n: 0 }],
       [[8], { yes: 2, n: 2 }, { yes: 0, n: 1 }],
     ]);
+  });
+  it('saves and passes from the previous version count alike', () => {
+    const b = scoreBands([T({ status: 'want', chosenAt: '2026-01-02', critics: rt(90) })], [{ qid: 'Q91', at: '2026-01-02', name: 'x', critics: rt(90) }]);
+    expect(b[0].blind).toEqual({ yes: 1, n: 2 });
   });
   it('tests a rule of thumb against the titles with the same scores that do not fit it', () => {
     const s = (source: string, score: number, asOf = '2025-07') => ({ source, score, value: `${score}`, asOf });

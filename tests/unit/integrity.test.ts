@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Dexie from 'dexie';
 import { db, PardeDB, type Episode, type Title } from '../../src/lib/db';
 import { buildBackup, parseBackup, restore, undoRestore } from '../../src/lib/backup';
-import { addFilm, addLink, deleteWatch, logWatch, reconcile, dismissTitle, refreshFilms, refreshTitle, removeTitle, seenAllAired, storeShow, setExpectation, setProgress, setSeasonSeen, setSeen, setStatus, syncShows, update } from '../../src/lib/actions';
+import { addFilm, addLink, deleteWatch, logWatch, reconcile, dismissTitle, refreshFilms, refreshTitle, removeTitle, saveFilmMeta, seenAllAired, storeShow, setExpectation, setProgress, setSeasonSeen, setSeen, setStatus, syncShows, update } from '../../src/lib/actions';
 import { completeSchedule, progress } from '../../src/lib/schedule';
 
 const T = (id: string, o: Partial<Title> = {}): Title => ({
@@ -498,6 +498,14 @@ describe('deleting, adding again and merging', () => {
     await restore(parsed({ dismissed: [{ qid: 'Q1', at: '2026-01-01T00:00:00Z', name: 'x' }, { qid: 'Q2', at: '2026-01-01T00:00:00Z', name: 'y' }] }).backup, 'merge');
     expect(await db.dismissed.toCollection().primaryKeys()).toEqual(['Q2']);
   });
+});
+
+it('a choice from the previous version keeps the scores it was made with when newer ones arrive', async () => {
+  const rt = (score: number) => ({ source: 'Rotten Tomatoes', value: `${score}%`, score });
+  await db.titles.add(T('wd:Q1', { qid: 'Q1', chosenAt: '2026-01-02T00:00:00Z', critics: [rt(90)] }));
+  const meta = { kind: 'film' as const, name: 'Heat', qid: 'Q1', genres: [], people: [], subjects: [], countries: [], languages: [], critics: [rt(50)] };
+  for (let i = 0; i < 2; i++) await saveFilmMeta('wd:Q1', meta, new Date(Date.now() + 1000).toISOString());
+  expect(await get('wd:Q1')).toMatchObject({ critics: [rt(50)], choiceScores: [rt(90)] });
 });
 
 describe('asking for new episodes checks every series that could have them', () => {

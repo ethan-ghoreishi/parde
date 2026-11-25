@@ -443,6 +443,25 @@ test('a new visit carries on from the shelf you had reached, and Second look sti
   expect(await ids()).toEqual([first[0]]);
 });
 
+test('titles the previous version had shown and you ignored do not come back first', async ({ page }) => {
+  await page.goto('./#/discover');
+  const tiles = page.locator('.shelf .tile');
+  const ids = () => tiles.evaluateAll((rows) => rows.map((row) => row.id));
+  await expect(tiles).toHaveCount(12);
+  const first = await ids();
+  await page.evaluate((qids) => new Promise<void>((ok) => {
+    const open = indexedDB.open('parde');
+    open.onsuccess = () => {
+      const tx = open.result.transaction('settings', 'readwrite');
+      tx.objectStore('settings').put({ key: 'shown', value: qids });
+      tx.oncomplete = () => (open.result.close(), ok());
+    };
+  }), first.map((id) => id.slice(5)));
+  await page.reload();
+  await expect(tiles).toHaveCount(12);
+  expect((await ids()).filter((id) => first.includes(id))).toEqual([]);
+});
+
 test('scores opened on an earlier visit still count as opened when you choose, also after a pass', async ({ page }) => {
   const panel = page.locator('.panel');
   const heat = page.locator('.tile', { hasText: 'Heat' });

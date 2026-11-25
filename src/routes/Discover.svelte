@@ -118,10 +118,11 @@
     detailsLoading = false;
     try {
       const list = t.key === REVISIT.key ? reconsider : await lookUp(t.key);
-      const before = t.key === REVISIT.key ? [] : ((await getSetting<Record<string, string[]>>('browsed', {}))[t.key] ?? []);
+      // Earlier versions kept one list for every thread, under another name.
+      const before = t.key === REVISIT.key ? [] : ((await getSetting<Record<string, string[]>>('browsed', {}))[t.key] ?? (await getSetting<unknown>('shown', [])));
       if (mine !== seq) return;
       found = list;
-      shown = new Set(before);
+      shown = new Set(Array.isArray(before) ? before : []);
       if (!unseen.length) shown = new Set(); // all of it seen before: from the top again
       if (!unseen.length && t.key === KNOWN.key && !route.params.get('from') && ways.length) {
         lastKey = ways[0].key; // nothing left to remember: somewhere new
