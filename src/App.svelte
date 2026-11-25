@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Dexie from 'dexie';
   import { route } from './lib/router.svelte';
   import { ui, clock, toast, errorText } from './lib/ui.svelte';
   import { syncShows, reconcileShows, refreshFilms } from './lib/actions';
@@ -58,8 +59,10 @@
       }
     };
     addEventListener('keydown', onKey);
-    // Anything that failed without being caught where it happened is a save that did not happen: never silent.
-    const onFail = (e: PromiseRejectionEvent) => toast(`Not saved: ${errorText(e.reason)}`, 'error');
+    // A storage failure not caught where it happened is a save that did not happen: never silent.
+    const onFail = (e: PromiseRejectionEvent) => {
+      if (e.reason instanceof Dexie.DexieError) toast(`Not saved: ${errorText(e.reason)}`, 'error');
+    };
     addEventListener('unhandledrejection', onFail);
     return () => {
       removeEventListener('unhandledrejection', onFail);

@@ -1,4 +1,4 @@
-import { db, now, STORES, USER_FIELDS, type Episode, type Link, type Removed, type Seen, type StoreName, type Title, type UserField, type Watch } from './db';
+import { db, now, STORES, USER_FIELDS, type Episode, type Link, type Removed, type Seen, type StoreName, type Title, type Watch } from './db';
 import { reconcile } from './actions';
 import { cleanUrl } from './links';
 
@@ -206,8 +206,6 @@ export interface Restored {
   leftOut: number;
 }
 
-/** Fields that are only meaningful together. */
-const WITH: Partial<Record<UserField, (keyof Title)[]>> = { expectation: ['expectedAt'], status: ['finishedAt', 'chosenAt', 'scoresAt'] };
 
 /**
  * One title recorded on two sides. Each thing you set follows its own latest edit, clearing included.
@@ -220,13 +218,17 @@ export function mergeTitle(here: Title, file: Title): Title {
   for (const f of USER_FIELDS) {
     const [h, o] = [here.edited?.[f], file.edited?.[f]];
     const from = h || o ? ((h ?? '') >= (o ?? '') ? here : file) : newer;
-    for (const k of [f, ...(WITH[f] ?? [])]) {
+    for (const k of f === 'expectation' ? ([f, 'expectedAt'] as const) : [f]) {
       const v = h || o ? from[k] : (newer[k] ?? older[k]);
       if (v === undefined) delete out[k];
       else (out as unknown as Rec)[k] = v;
     }
     if (h || o) out.edited![f] = [h, o].filter(Boolean).sort().at(-1);
   }
+  // What happened, rather than what you chose: known to one side is known. Scores were seen when they were first seen.
+  for (const k of ['finishedAt', 'chosenAt'] as const) if (newer[k] ?? older[k]) out[k] = newer[k] ?? older[k];
+  const saw = [here.scoresAt, file.scoresAt].filter((x) => !!x).sort()[0];
+  if (saw) out.scoresAt = saw;
   // Writing is not replaceable: a note here that loses to a different one in the file is kept below it.
   const [mine, theirs] = [here.note?.trim(), out.note?.trim()];
   if (mine && theirs && !theirs.includes(mine)) out.note = `${theirs}\n\n— also noted on this device —\n${mine}`;

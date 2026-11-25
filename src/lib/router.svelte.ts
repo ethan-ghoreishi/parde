@@ -23,6 +23,10 @@ function scrollBack(y: number, tries = 40) {
   else scrollTo(0, y);
 }
 
+// A reload stays where it was, too.
+const startY = (history.state as { y?: number } | null)?.y;
+if (startY) tick().then(() => scrollBack(startY));
+
 addEventListener('hashchange', () => {
   clearTimeout(saving);
   const moved = parse().path !== route.path;

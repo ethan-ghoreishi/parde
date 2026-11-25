@@ -415,9 +415,12 @@ export async function reconcile(titleId: string, byUser = true, o: { unmarked?: 
 }
 
 /** On this device only, no network: finished shows whose next episode has come out since are back in progress. */
-export async function reconcileShows() {
-  const done = await db.titles.where('status').equals('watched').filter((t) => t.kind === 'show').primaryKeys();
-  for (const id of done) await reconcile(id, false);
+export function reconcileShows() {
+  // One transaction: pages follow the stored data, and would reload everything after each series.
+  return db.transaction('rw', db.titles, db.episodes, db.seen, async () => {
+    const done = await db.titles.where('status').equals('watched').filter((t) => t.kind === 'show').primaryKeys();
+    for (const id of done) await reconcile(id, false);
+  });
 }
 
 async function mark(titleId: string, eps: Pick<Episode, 'id'>[], bulk = false) {

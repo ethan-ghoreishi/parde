@@ -37,6 +37,8 @@ describe('ways in', () => {
     expect(threadOf('place:Q794', [])?.label).toBe('From Iran');
     expect(threadOf('nonsense', [])).toBeUndefined();
     expect(threadOf('place:Q1', [])).toBeUndefined();
+    expect(threadOf('title:Q1 } SELECT', [])).toBeUndefined(); // only ever an id
+    expect(threadOf('person:x', [])).toBeUndefined();
   });
   it('decades and the well known need no network', async () => {
     const fetch = vi.fn();
@@ -49,6 +51,20 @@ describe('ways in', () => {
     expect(all.filter((f) => f.kind === 'show').every((f) => f.tvmaze)).toBe(true);
     expect(new Set(all.map((f) => f.qid)).size).toBe(all.length);
     expect(fetch).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('a person', () => {
+  const Q = 'http://www.wikidata.org/entity/';
+  const b = (o: Record<string, string>) => Object.fromEntries(Object.entries(o).map(([k, value]) => [k, { value }]));
+  const credit = (i: number, prop: string) => b({ w: `${Q}Q${i}`, wLabel: `W${i}`, prop: `http://www.wikidata.org/prop/direct/${prop}`, type: `${Q}Q11424`, person: `${Q}Q5`, l: `${i}`, y: '1990' });
+  const serve = (rows: unknown[]) => vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ results: { bindings: rows } }))));
+  it('leads to what they made, best known first, not where they appeared; an actor leads to their roles', async () => {
+    serve([1, 2, 3, 4].map((i) => credit(i, 'P57')).concat(credit(99, 'P161')));
+    expect((await lookUp('person:Q5')).map((f) => f.name)).toEqual(['W4', 'W3', 'W2', 'W1']);
+    serve([credit(1, 'P57'), credit(8, 'P161'), credit(9, 'P161')]);
+    expect((await lookUp('person:Q5')).map((f) => f.name)).toEqual(['W9', 'W8', 'W1']);
     vi.unstubAllGlobals();
   });
 });

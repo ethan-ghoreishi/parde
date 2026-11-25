@@ -216,6 +216,26 @@ describe('backups', () => {
     expect(await db.titles.get('wd:Q2')).toBeUndefined();
     expect(await db.seen.toCollection().primaryKeys()).toEqual([1]);
   });
+  it('a newer choice of status elsewhere does not lose the date it was watched, or that scores were seen', async () => {
+    await db.titles.add(T('wd:Q1', { status: 'watched', finishedAt: '2026-02-02', scoresAt: '2026-01-05T00:00:00Z', updatedAt: '2026-02-02T00:00:00Z', edited: { status: '2026-02-02T00:00:00Z' } }));
+    await restore(parsed({ titles: [T('wd:Q1', { status: 'watched', chosenAt: '2026-01-01T00:00:00Z', scoresAt: '2026-01-09T00:00:00Z', updatedAt: '2026-03-03T00:00:00Z', edited: { status: '2026-03-03T00:00:00Z' } })] }).backup, 'merge');
+    expect(await get('wd:Q1')).toMatchObject({ finishedAt: '2026-02-02', chosenAt: '2026-01-01T00:00:00Z', scoresAt: '2026-01-05T00:00:00Z' });
+  });
+  it('an expectation you cleared takes its date with it', async () => {
+    await db.titles.add(T('wd:Q1', { updatedAt: '2026-03-03T00:00:00Z', edited: { expectation: '2026-03-03T00:00:00Z' } }));
+    await restore(parsed({ titles: [T('wd:Q1', { expectation: 4, expectedAt: '2026-01-01T00:00:00Z' })] }).backup, 'merge');
+    expect(await get('wd:Q1')).not.toHaveProperty('expectedAt');
+    expect((await get('wd:Q1')).expectation).toBeUndefined();
+  });
+  it('a different note here is kept below the newer one, once', async () => {
+    await db.titles.add(T('wd:Q1', { note: 'mine', updatedAt: '2026-01-02T00:00:00Z' }));
+    const file = { titles: [T('wd:Q1', { note: 'theirs', updatedAt: '2026-02-02T00:00:00Z', edited: { note: '2026-02-02T00:00:00Z' } })] };
+    await restore(parsed(file).backup, 'merge');
+    const once = (await get('wd:Q1')).note!;
+    expect(once).toMatch(/^theirs[\s\S]*mine$/);
+    await restore(parsed(file).backup, 'merge');
+    expect((await get('wd:Q1')).note!.match(/mine/g)).toHaveLength(1);
+  });
   it('merge reports what it did and does not repeat the same link or viewing', async () => {
     await db.titles.add(T('wd:Q1', { updatedAt: '2026-03-01T00:00:00Z' }));
     await addLink('wd:Q1', 'https://a.org/x');

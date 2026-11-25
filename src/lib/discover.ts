@@ -50,6 +50,7 @@ export function threadOf(key: string, library: Title[], name = ''): Thread | und
   const mine = threads(library).find((t) => t.key === key);
   if (mine) return mine;
   const [kind, ref] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+  if ((kind === 'title' || kind === 'person') && !/^Q\d+$/.test(ref)) return undefined; // it goes into a query
   if (kind === 'title') return { key, label: `Like ${library.find((t) => t.qid === ref)?.name ?? (name || 'this title')}`, why: 'Shares its makers, subject or cast' };
   if (kind === 'person') return { key, label: name || 'This person', why: 'Their other work' };
   if (kind === 'about') return { key, label: `About ${ref}` };
@@ -75,7 +76,12 @@ const seeds: Find[] = (seedRows as unknown as Row[]).map(([q, name, year, tvmaze
 export async function lookUp(key: string): Promise<Find[]> {
   const ref = key.slice(key.indexOf(':') + 1);
   if (key.startsWith('title:')) return neighbours(ref);
-  if (key.startsWith('person:')) return (await credits([ref])).sort((a, b) => (b.known ?? 0) - (a.known ?? 0));
+  if (key.startsWith('person:')) {
+    const all = (await credits([ref])).sort((a, b) => (b.known ?? 0) - (a.known ?? 0));
+    // A director's cameos are not their work; an actor's roles are.
+    const made = all.filter((c) => c.roles.some((r) => r !== 'acted'));
+    return made.length >= 4 ? made : all;
+  }
   if (key.startsWith('about:')) return aboutSubject(ref);
   if (key.startsWith('place:')) return fromCountry(ref);
   if (key.startsWith('decade:')) return seeds.filter((s) => s.year! >= Number(ref) && s.year! < Number(ref) + 10);

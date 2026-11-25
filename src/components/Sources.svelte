@@ -203,9 +203,10 @@
   li.dim { border-style: dashed; }
   li.dim .host { color: var(--muted); text-decoration: line-through; }
   .main { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; justify-content: space-between; }
-  .open { background: transparent; border: none; padding: 0.2rem 0.5rem; gap: 0.5rem; flex: 1; justify-content: flex-start; min-width: 0; flex-wrap: wrap; white-space: normal; text-align: left; }
+  .open { background: transparent; border: none; padding: 0.2rem 0.5rem; gap: 0.5rem; flex: 1 1 14rem; justify-content: flex-start; min-width: 0; flex-wrap: wrap; white-space: normal; text-align: left; }
   .open:not(:disabled) .host { color: var(--accent); font-weight: 600; }
   .tools { gap: 0.1rem; }
+  .tools button { padding: 0.25rem 0.55rem; }
   .add { display: grid; gap: 0.15rem; }
   .scope { border: none; padding: 0; margin: 0.5rem 0 0; gap: 1rem; }
   .scope label { color: var(--text); margin: 0; gap: 0.35rem; }
