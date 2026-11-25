@@ -57,8 +57,9 @@
     const name = route.params.get('name') ?? '';
     if (!data.ready) return;
     untrack(() => {
-      if (left && left.asked === key && !thread) {
-        ({ thread, found, items, metas, here, opened, ways } = left);
+      // Back, or the tab bar (an installed app has no Back button): the shelf is as you left it.
+      if (left && !thread && (left.asked === key || !key)) {
+        ({ asked, thread, found, items, metas, here, opened, ways } = left);
         return;
       }
       // Yours first, whichever kind comes up; with nothing to go on, what nearly everyone has seen.

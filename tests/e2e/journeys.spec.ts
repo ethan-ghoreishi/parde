@@ -371,6 +371,13 @@ test('discover: rating is saying you have seen it; scores stay closed, and openi
   await expect(page.locator('.next-ep')).toContainText('S02E01');
   await page.goBack();
   await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
+  // The same by the tab bar: an installed app has no Back button
+  await page.locator('.tile', { hasText: 'Heat' }).click();
+  await panel.getByRole('link', { name: 'Open' }).click();
+  await expect(page.getByRole('heading', { name: 'Heat', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Discover', exact: true }).first().click();
+  await expect(page.getByRole('heading', { name: 'Like Collateral' })).toBeVisible();
+  await expect(page.getByText('This shelf: 1 seen, 2 on your list.')).toBeVisible();
 });
 
 test('a write that fails is never reported as done', async ({ page }) => {
